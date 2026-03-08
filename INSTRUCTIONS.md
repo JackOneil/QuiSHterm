@@ -39,3 +39,6 @@ Tento projekt je stavěný na frameworku **Tauri** (Rust backend + SvelteKit fro
 - Preferujte malé a izolované úpravy namísto obřích přepisů komponent.
 - Pokud provádíte refaktorování (např. přidání ARIA tagů do UI nebo přepis komponenty), **vždy otestujte svelte kompilaci** před finálním odevzdáním (`npm run build`).
 - Nevytvářejte vnořené bash přikazy typu `echo >` pro tvorbu souborů, používejte interní FS/write nástroje.
+- **DŮLEŽITÉ: Napsaný kód a integrace third-party procesů (např. WSL, filesystém) MUSÍ MÍT VŽDY ZABUDOVANÝ DEBUG LOGGING.**
+  - Aplikace obsahuje interní toggle pro zapnutí "Debug Mode" u uživatele.
+  - Využívejte metodu `crate::settings_storage::log_debug(&app_handle, "Zpráva");`, která v případně zapnutého debug módu zapíše zprávu do konzole/UI a dramaticky tím zrychluje řešení bugů. Každá nová future musí logovat své stavy a výjimky.

@@ -7,6 +7,7 @@
   import ConnectionManager from "$lib/components/ConnectionManager.svelte";
   import SettingsManager from "$lib/components/SettingsManager.svelte";
   import QuickConnect from "$lib/components/QuickConnect.svelte";
+  import SplitView from "$lib/components/SplitView.svelte";
 
   let sidebarRef: QuickConnect;
 
@@ -15,10 +16,47 @@
   let showSidebar = true;
   let activeTabId = "";
   
+  export type SplitDirection = 'row' | 'col';
+  export interface SplitNode {
+    id: string;
+    type: 'terminal' | 'split';
+    direction?: SplitDirection;
+    children?: SplitNode[];
+    profile?: any;
+  }
+
+  interface PaneLeaf {
+    id: string;
+    profile: any;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }
+
+  function getLeaves(node: SplitNode, x: number, y: number, w: number, h: number): PaneLeaf[] {
+    if (node.type === 'terminal' || !node.children || node.children.length === 0) {
+      return [{ id: node.id, profile: node.profile, x, y, w, h }];
+    }
+    let leaves: PaneLeaf[] = [];
+    if (node.direction === 'row') {
+      let childW = w / node.children.length;
+      for (let i = 0; i < node.children.length; i++) {
+        leaves = leaves.concat(getLeaves(node.children[i], x + i * childW, y, childW, h));
+      }
+    } else {
+      let childH = h / node.children.length;
+      for (let i = 0; i < node.children.length; i++) {
+        leaves = leaves.concat(getLeaves(node.children[i], x, y + i * childH, w, childH));
+      }
+    }
+    return leaves;
+  }
+
   interface Tab {
     id: string;
     title: string;
-    profile: any;
+    root: SplitNode;
   }
   
   let tabs: Tab[] = [];
@@ -69,7 +107,12 @@
     showManager = false;
     
     const newTabId = `tab_${Date.now()}`;
-    tabs = [...tabs, { id: newTabId, title: profile.name, profile }];
+    const rootNode: SplitNode = {
+      id: `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      type: 'terminal',
+      profile
+    };
+    tabs = [...tabs, { id: newTabId, title: profile.name, root: rootNode }];
     activeTabId = newTabId;
     // Refresh sidebar
     if (sidebarRef) sidebarRef.refresh();
@@ -78,7 +121,12 @@
   function handleQuickConnect(event: CustomEvent<any>) {
     const profile = event.detail;
     const newTabId = `tab_${Date.now()}`;
-    tabs = [...tabs, { id: newTabId, title: profile.name, profile }];
+    const rootNode: SplitNode = {
+      id: `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      type: 'terminal',
+      profile
+    };
+    tabs = [...tabs, { id: newTabId, title: profile.name, root: rootNode }];
     activeTabId = newTabId;
   }
 
@@ -89,9 +137,13 @@
     } else if (tabs.length === 0) {
       activeTabId = "";
     }
-    // Cleanup stats
-    const { [id]: _, ...rest } = sessionStats;
-    sessionStats = rest;
+
+    const prefix = `${id}_`;
+    const newStats = { ...sessionStats };
+    for (const key of Object.keys(newStats)) {
+      if (key.startsWith(prefix)) delete newStats[key];
+    }
+    sessionStats = newStats;
   }
 
   function handleTabContextMenu(e: MouseEvent, tabId: string) {
@@ -101,6 +153,111 @@
 
   function closeContextMenu() {
     contextMenu = { ...contextMenu, visible: false };
+  }
+
+  function reconnectTab(tabId: string) {
+    const tabIndex = tabs.findIndex(t => t.id === tabId);
+    if (tabIndex === -1) return;
+    
+    const newId = `tab_${Date.now()}`;
+    const updatedTab = { ...tabs[tabIndex], id: newId };
+    
+    tabs = [
+      ...tabs.slice(0, tabIndex),
+      updatedTab,
+      ...tabs.slice(tabIndex + 1)
+    ];
+    
+    if (activeTabId === tabId) {
+      activeTabId = newId;
+    }
+    
+    // Clear old stats logic based on compound pane id prefix
+    const prefix = `${tabId}_`;
+    const newStats = { ...sessionStats };
+    for (const key of Object.keys(newStats)) {
+      if (key.startsWith(prefix)) delete newStats[key];
+    }
+    sessionStats = newStats;
+    
+    closeContextMenu();
+  }
+
+  function splitNode(node: SplitNode, targetId: string, direction: SplitDirection): SplitNode | null {
+    if (node.id === targetId) {
+      if (node.type !== 'terminal') return node;
+      
+      const newTerminalNode: SplitNode = {
+        id: `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        type: 'terminal',
+        profile: node.profile
+      };
+      
+      return {
+        id: `s_${Date.now()}`,
+        type: 'split',
+        direction,
+        children: [
+          { ...node },
+          newTerminalNode
+        ]
+      };
+    }
+    
+    if (node.children) {
+      const newChildren = node.children.map(child => splitNode(child, targetId, direction)).filter(Boolean) as SplitNode[];
+      return { ...node, children: newChildren };
+    }
+    
+    return node;
+  }
+
+  function handleSplitDirect(id: string, direction: SplitDirection) {
+    if (!activeTabId) return;
+    tabs = tabs.map(tab => {
+      if (tab.id === activeTabId) {
+        return { ...tab, root: splitNode(tab.root, id, direction)! };
+      }
+      return tab;
+    });
+  }
+
+  function removeNode(node: SplitNode, targetId: string): SplitNode | null {
+    if (node.id === targetId) return null;
+    
+    if (node.children) {
+      const newChildren = node.children
+        .map(child => removeNode(child, targetId))
+        .filter(Boolean) as SplitNode[];
+        
+      if (newChildren.length === 0) return null;
+      if (newChildren.length === 1) return newChildren[0]; // flatten
+      
+      return { ...node, children: newChildren };
+    }
+    
+    return node;
+  }
+
+  function handleClosePaneDirect(id: string) {
+    if (!activeTabId) return;
+    
+    const compoundId = `${activeTabId}_${id}`;
+    const newStats = { ...sessionStats };
+    delete newStats[compoundId];
+    sessionStats = newStats;
+
+    tabs = tabs.map(tab => {
+      if (tab.id === activeTabId) {
+        const newRoot = removeNode(tab.root, id);
+        if (!newRoot) {
+           setTimeout(() => closeTab(tab.id), 0);
+           return tab;
+        }
+        return { ...tab, root: newRoot };
+      }
+      return tab;
+    });
   }
 
   function startRename(tabId: string) {
@@ -193,8 +350,23 @@
       {/if}
 
       {#each tabs as tab (tab.id)}
-        <div class="terminal-wrapper" style="display: {activeTabId === tab.id ? 'block' : 'none'}">
-             <TerminalArea sessionId={tab.id} profile={tab.profile} />
+        <div class="terminal-wrapper" style="display: {activeTabId === tab.id ? 'block' : 'none'}; position: relative; width: 100%; height: 100%; overflow: hidden;">
+             {#each getLeaves(tab.root, 0, 0, 100, 100) as leaf (leaf.id)}
+                <div class="absolute-pane" style="left: {leaf.x}%; top: {leaf.y}%; width: {leaf.w}%; height: {leaf.h}%;">
+                   <div class="pane-controls">
+                       <button on:click={() => handleSplitDirect(leaf.id, 'row')} title="Split Right">
+                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="M12 3v18"/></svg>
+                       </button>
+                       <button on:click={() => handleSplitDirect(leaf.id, 'col')} title="Split Down">
+                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="M3 12h18"/></svg>
+                       </button>
+                       <button on:click={() => handleClosePaneDirect(leaf.id)} class="close-p" title="Close Pane">
+                         <X size={14} />
+                       </button>
+                   </div>
+                   <TerminalArea sessionId="{tab.id}_{leaf.id}" profile={leaf.profile} />
+                </div>
+             {/each}
         </div>
       {/each}
     </div>
@@ -208,6 +380,7 @@
   {#if contextMenu.visible}
     <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px">
       <button class="context-item" on:click={() => startRename(contextMenu.tabId)}>Rename</button>
+      <button class="context-item" on:click={() => reconnectTab(contextMenu.tabId)}>Reconnect</button>
       <button class="context-item danger" on:click={() => { closeTab(contextMenu.tabId); closeContextMenu(); }}>Close</button>
     </div>
   {/if}
@@ -232,16 +405,16 @@
       </div>
       <div class="status-divider"></div>
       <div class="status-item">
-        {activeTab.profile.user}@{activeTab.profile.host}:{activeTab.profile.port}
+        {activeTab.root.profile ? `${activeTab.root.profile.user}@${activeTab.root.profile.host}:${activeTab.root.profile.port}` : "Split View"}
       </div>
       
-      {#if sessionStats[activeTabId]}
+      {#if sessionStats && Object.keys(sessionStats).some(k => k.startsWith(`${activeTabId}_`))}
         <div class="status-divider"></div>
         <div class="status-item" title="Transmitted">
-          TX: <span class="stats-val">{formatBytes(sessionStats[activeTabId].tx)}</span>
+          TX: <span class="stats-val">{formatBytes(Object.entries(sessionStats).filter(([k]) => k.startsWith(`${activeTabId}_`)).reduce((acc, [_, stats]) => acc + stats.tx, 0))}</span>
         </div>
         <div class="status-item" title="Received">
-          RX: <span class="stats-val">{formatBytes(sessionStats[activeTabId].rx)}</span>
+          RX: <span class="stats-val">{formatBytes(Object.entries(sessionStats).filter(([k]) => k.startsWith(`${activeTabId}_`)).reduce((acc, [_, stats]) => acc + stats.rx, 0))}</span>
         </div>
       {/if}
     {:else}
@@ -544,5 +717,57 @@
 
   .text-muted {
     color: var(--text-muted);
+  }
+  /* Pane CSS */
+  .absolute-pane {
+    position: absolute;
+    border: 1px solid var(--border);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-darker);
+    z-index: 10;
+  }
+  .absolute-pane .pane-controls {
+    position: absolute;
+    top: 5px;
+    right: 15px;
+    z-index: 50;
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+    background: var(--bg-surface);
+    padding: 3px 6px;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    border: 1px solid var(--border);
+  }
+  .absolute-pane:hover .pane-controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .absolute-pane .pane-controls button {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: background-color 0.1s, color 0.1s;
+  }
+  .absolute-pane .pane-controls button:hover {
+    color: var(--text-main);
+    background-color: var(--bg-hover);
+  }
+  .absolute-pane .pane-controls .close-p:hover {
+    color: #ef4444;
+    background-color: rgba(239, 68, 68, 0.1);
   }
 </style>

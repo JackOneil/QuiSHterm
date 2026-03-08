@@ -18,11 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Settings Architecture**: Resizable settings modal with options stored persistently in the app data directory.
 - **Terminal Settings**: Ability to configure scrollback buffer size (up to 100000 lines) and display a reactive line number gutter.
 - **Tabbed Interface**: Manage multiple active SSH connections with the ability to rename sessions and quickly switch between them without losing state or scroll history.
+- **Tab Context Menu Improvements**: Added a 'Reconnect' action to the session tab context menu allowing users to quickly restart disconnected or frozen sessions.
+- **Split Panes**: Completely refactored the layout engine to support vertical and horizontal terminal splitting! Right-click or use the pane-controls to split terminals infinitely and view multiple connections side-by-side within a single tab.
 
 ### Changed
 - Refactored frontend structure for maximum UI responsiveness using SvelteKit.
 - Moved dragging behavior in sidebar to a more resilient click-to-move pattern avoiding bugs in webview drag interactions.
 - Replaced hard-coded highlight dictionary string replacements with proper regex evaluations that support special characters.
+- Disabled the global native browser right-click context menu to enforce an app-like feel, while retaining native right-click copy/paste strictly inside the xterm canvas.
 
 ### Fixed
 - Fixed issue where the settings modal would incorrectly close when accidentally dragging off the resize bounds and releasing the mouse check.

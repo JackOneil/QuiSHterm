@@ -68,6 +68,17 @@
     term.loadAddon(fitAddon);
     term.open(terminalContainer);
     
+    // Intercept function keys (especially F10 used by MC/htop) so the browser doesn't swallow them
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.code === 'F10' || e.key === 'F10') {
+        if (e.type === 'keydown') {
+          e.preventDefault();
+        }
+        return true; // Let xterm process it and send it to PTY
+      }
+      return true;
+    });
+
     try {
         webglAddon = new WebglAddon();
         term.loadAddon(webglAddon);
@@ -113,15 +124,24 @@
       await invoke("connect_ssh", {
         sessionId,
         host: profile.host,
-        port: Number(profile.port),
-        user: profile.user,
+        port: Number(profile.port) || 22,
+        user: profile.user || "",
         password: profile.password || null,
-        privateKey: profile.private_key || null
+        privateKey: profile.private_key || null,
+        authType: profile.auth_type || null
       });
       
       term.writeln(`\x1b[32m[SUCCESS]\x1b[0m Connected.\r\n`);
       isConnecting = false;
-      invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch(e => console.error("Initial resize error:", e));
+      
+      // Delay initial resize slightly to let CSS/Flexbox settle entirely
+      setTimeout(() => {
+        try {
+          fitAddon.fit();
+          invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch(e => console.error(e));
+        } catch(e) {}
+      }, 50);
+      
     } catch(e: any) {
       isConnecting = false;
       connectionError = e;
@@ -202,7 +222,7 @@
   }
 </script>
 
-<div class="terminal-outer">
+<div class="terminal-outer" on:click={() => term && term.focus()}>
   {#if showLineNumbers}
     <div class="line-gutter" bind:this={lineNumberEl}></div>
   {/if}
@@ -242,10 +262,13 @@
   }
 
   .terminal-container {
-    flex: 1;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
     height: 100%;
     padding: 4px;
     background-color: var(--bg-darker);
+    overflow: hidden;
   }
 
   :global(.xterm-viewport::-webkit-scrollbar) {

@@ -1,6 +1,8 @@
 mod ssh_manager;
 pub mod profile_storage;
 pub mod settings_storage;
+pub mod wsl_detector;
+pub mod pty_manager;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -28,7 +30,8 @@ pub fn run() {
             profile_storage::delete_profile,
             settings_storage::load_settings,
             settings_storage::save_settings,
-            settings_storage::get_settings_path_info
+            settings_storage::get_settings_path_info,
+            wsl_detector::get_wsl_distributions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

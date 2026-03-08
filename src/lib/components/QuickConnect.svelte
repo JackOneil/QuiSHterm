@@ -7,6 +7,7 @@
 
   let profiles: any[] = [];
   let folders: any[] = [];
+  let wslDistributions: any[] = [];
   let showNewFolder = false;
   let newFolderName = "";
   let newFolderColor = "#3b82f6";
@@ -92,6 +93,12 @@
       folders = settings.folders || [];
     } catch (e) {
       console.error("Failed to load folders:", e);
+    }
+    try {
+      wslDistributions = await invoke("get_wsl_distributions");
+    } catch (e) {
+      console.warn("WSL detection skipped/failed:", e);
+      wslDistributions = [];
     }
   }
 
@@ -231,6 +238,28 @@
   {/if}
 
   <div class="sidebar-list">
+    <!-- WSL Distributions -->
+    {#if wslDistributions.length > 0}
+      <div class="folder-group">
+        <div class="folder-header" aria-hidden="true" style="cursor: default;">
+          <div class="folder-label">
+            <span class="folder-dot" style="background-color: #f97316"></span>
+            <span class="folder-name" style="font-weight: 600;">WSL Distributions</span>
+          </div>
+        </div>
+        <div class="folder-items">
+          {#each wslDistributions as wsl}
+            <div class="profile-item" role="button" tabindex="0">
+              <button class="profile-connect" on:click={() => connectProfile({ id: `wsl_${wsl.name}`, name: wsl.name, host: wsl.name, auth_type: 'wsl' })}>
+                <Server size={12} />
+                <span class="profile-name">{wsl.name}</span>
+              </button>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     {#each folders as folder}
       <div class="folder-group" role="group" aria-label={folder.name}>
         {#if renameFolderState.active && renameFolderState.id === folder.id}

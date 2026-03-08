@@ -157,7 +157,7 @@
             </label>
           </div>
         {:else if activeTab === 'Dictionary'}
-          <div class="settings-group">
+          <div class="settings-group dict-group">
             <h3>Color Highlighting Dictionary</h3>
             <p class="desc mb-2">Configure words to automatically highlight in the terminal output.</p>
             
@@ -284,6 +284,12 @@
     overflow-y: auto;
   }
 
+  .dict-group {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
   .settings-group h3 {
     margin-top: 0;
     margin-bottom: 16px;
@@ -379,7 +385,7 @@
   .form-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
   .form-row select { padding: 8px 12px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; color: white; outline: none; cursor: pointer; }
 
-  .highlight-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; padding-right: 4px; }
+  .highlight-list { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
   .highlight-item { display: flex; justify-content: space-between; align-items: center; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; }
   .hl-keyword { font-family: monospace; font-size: 13px; font-weight: 500;}
   .hl-controls { display: flex; align-items: center; gap: 8px;}

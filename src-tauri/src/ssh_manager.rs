@@ -47,7 +47,16 @@ pub async fn connect_ssh(
     user: String,
     password: Option<String>,
     private_key: Option<String>,
+    auth_type: Option<String>,
 ) -> Result<(), String> {
+    // WSL Routing
+    if let Some(auth) = auth_type.as_ref() {
+        if auth == "wsl" {
+            // Using `host` as the distro name from the frontend setup
+            return crate::pty_manager::connect_wsl(app.clone(), state.clone(), session_id, host).await;
+        }
+    }
+
     let app_handle = app.clone();
     let writers = state.writers.clone();
     
