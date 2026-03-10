@@ -3,12 +3,9 @@ pub mod profile_storage;
 pub mod settings_storage;
 pub mod wsl_detector;
 pub mod pty_manager;
+mod sftp_manager;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -21,16 +18,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            greet,
             ssh_manager::connect_ssh,
             ssh_manager::write_stdin,
             ssh_manager::resize_pty,
+            sftp_manager::sftp_list_dir,
+            sftp_manager::sftp_download_file,
+            sftp_manager::sftp_upload_file,
             profile_storage::load_profiles,
             profile_storage::save_profile,
             profile_storage::delete_profile,
             settings_storage::load_settings,
             settings_storage::save_settings,
             settings_storage::get_settings_path_info,
+            settings_storage::load_autocomplete,
+            settings_storage::save_autocomplete,
             wsl_detector::get_wsl_distributions
         ])
         .run(tauri::generate_context!())

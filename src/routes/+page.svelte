@@ -2,12 +2,12 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { Terminal as TerminalIcon, Settings, Plus, X, PanelRight } from "lucide-svelte";
+  import { Terminal as TerminalIcon, Settings, Plus, X, PanelRight, FolderPlus } from "lucide-svelte";
   import TerminalArea from "$lib/components/TerminalArea.svelte";
   import ConnectionManager from "$lib/components/ConnectionManager.svelte";
   import SettingsManager from "$lib/components/SettingsManager.svelte";
   import QuickConnect from "$lib/components/QuickConnect.svelte";
-  import SplitView from "$lib/components/SplitView.svelte";
+  import SftpBrowser from "$lib/components/SftpBrowser.svelte";
 
   let sidebarRef: QuickConnect;
 
@@ -71,10 +71,18 @@
   let contextMenu = { visible: false, x: 0, y: 0, tabId: "" };
   let renameInput = { visible: false, tabId: "", value: "" };
 
+  // SFTP state
+  let sftpTargetTabId: string | null = null;
+  let sftpServerName: string = "";
+
+  // Connection State Tracking
+  let connectionStates: Record<string, boolean> = {};
+
   onMount(async () => {
     unlistenTerminated = await listen("ssh-terminated", (event) => {
       const terminatedId = event.payload as string;
-      closeTab(terminatedId);
+      connectionStates[terminatedId] = false;
+      connectionStates = { ...connectionStates }; // trigger reactivity
     });
     unlistenStats = await listen("ssh-stats", (event: any) => {
       const payload = event.payload;
@@ -107,11 +115,13 @@
     showManager = false;
     
     const newTabId = `tab_${Date.now()}`;
+    const newPaneId = `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     const rootNode: SplitNode = {
-      id: `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: newPaneId,
       type: 'terminal',
       profile
     };
+    connectionStates[`${newTabId}_${newPaneId}`] = true;
     tabs = [...tabs, { id: newTabId, title: profile.name, root: rootNode }];
     activeTabId = newTabId;
     // Refresh sidebar
@@ -121,11 +131,13 @@
   function handleQuickConnect(event: CustomEvent<any>) {
     const profile = event.detail;
     const newTabId = `tab_${Date.now()}`;
+    const newPaneId = `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     const rootNode: SplitNode = {
-      id: `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: newPaneId,
       type: 'terminal',
       profile
     };
+    connectionStates[`${newTabId}_${newPaneId}`] = true;
     tabs = [...tabs, { id: newTabId, title: profile.name, root: rootNode }];
     activeTabId = newTabId;
   }
@@ -187,11 +199,13 @@
     if (node.id === targetId) {
       if (node.type !== 'terminal') return node;
       
+      const newPaneId = `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
       const newTerminalNode: SplitNode = {
-        id: `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+        id: newPaneId,
         type: 'terminal',
         profile: node.profile
       };
+      connectionStates[`${activeTabId}_${newPaneId}`] = true;
       
       return {
         id: `s_${Date.now()}`,
@@ -381,8 +395,28 @@
     <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px">
       <button class="context-item" on:click={() => startRename(contextMenu.tabId)}>Rename</button>
       <button class="context-item" on:click={() => reconnectTab(contextMenu.tabId)}>Reconnect</button>
+      <button class="context-item" on:click={() => {
+        const t = tabs.find(x => x.id === contextMenu.tabId);
+        if (t) {
+          const leaves = getLeaves(t.root, 0, 0, 100, 100);
+          if (leaves.length > 0) {
+            sftpTargetTabId = `${t.id}_${leaves[0].id}`;
+            sftpServerName = t.title;
+          }
+        }
+        closeContextMenu();
+      }}>Open SFTP</button>
       <button class="context-item danger" on:click={() => { closeTab(contextMenu.tabId); closeContextMenu(); }}>Close</button>
     </div>
+  {/if}
+
+  <!-- SFTP Browser Modal -->
+  {#if sftpTargetTabId}
+    <SftpBrowser 
+      sessionId={sftpTargetTabId} 
+      serverName={sftpServerName || "Server"} 
+      on:close={() => sftpTargetTabId = null}
+    />
   {/if}
 
   {#if showManager}
@@ -400,12 +434,22 @@
   <!-- Status Bar -->
   <footer class="status-bar">
     {#if activeTab}
-      <div class="status-item state-connected">
-        <div class="status-dot"></div> Connected
-      </div>
+      {#if connectionStates[`${activeTabId}_${activeTab.root.id}`] !== false}
+        <div class="status-item state-connected">
+          <div class="status-dot"></div> Connected
+        </div>
+      {:else}
+        <div class="status-item state-disconnected">
+          <div class="status-dot" style="background-color: #ef4444; box-shadow: 0 0 5px rgba(239,68,68,0.5);"></div> Disconnected
+        </div>
+      {/if}
       <div class="status-divider"></div>
       <div class="status-item">
         {activeTab.root.profile ? `${activeTab.root.profile.user}@${activeTab.root.profile.host}:${activeTab.root.profile.port}` : "Split View"}
+      </div>
+      <div class="status-divider"></div>
+      <div class="status-item text-muted" style="flex: 1; text-align: center; justify-content: center;">
+        <i>Tip: Use <b>Shift+Tab</b> while typing an unknown command to learn it permanently into autocomplete dictionary</i>
       </div>
       
       {#if sessionStats && Object.keys(sessionStats).some(k => k.startsWith(`${activeTabId}_`))}
@@ -707,6 +751,11 @@
 
   .state-connected {
     color: #10b981;
+    font-weight: 500;
+  }
+  
+  .state-disconnected {
+    color: #ef4444;
     font-weight: 500;
   }
 

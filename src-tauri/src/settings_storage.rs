@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -27,10 +28,16 @@ pub struct AppSettings {
     pub scrollback: u32,
     #[serde(default)]
     pub show_line_numbers: bool,
+    #[serde(default = "default_true")]
+    pub enable_autocomplete: bool,
 }
 
 fn default_scrollback() -> u32 {
     10000
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -67,6 +74,7 @@ impl Default for AppSettings {
             folders: vec![],
             scrollback: 10000,
             show_line_numbers: false,
+            enable_autocomplete: true,
         }
     }
 }
@@ -110,6 +118,68 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
         let _ = fs::create_dir_all(parent);
     }
     let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    fs::write(path, data).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AutocompleteDict {
+    pub globals: Vec<String>,
+    pub commands: HashMap<String, Vec<String>>,
+}
+
+impl Default for AutocompleteDict {
+    fn default() -> Self {
+        let mut commands = HashMap::new();
+        commands.insert("systemctl".to_string(), vec!["start".to_string(), "stop".to_string(), "restart".to_string(), "status".to_string(), "enable".to_string(), "disable".to_string(), "reload".to_string()]);
+        commands.insert("docker".to_string(), vec!["run".to_string(), "ps".to_string(), "build".to_string(), "images".to_string(), "rm".to_string(), "rmi".to_string(), "stop".to_string(), "start".to_string(), "exec".to_string(), "logs".to_string()]);
+        commands.insert("docker-compose".to_string(), vec!["up".to_string(), "down".to_string(), "start".to_string(), "stop".to_string(), "logs".to_string(), "build".to_string()]);
+        commands.insert("git".to_string(), vec!["status".to_string(), "add".to_string(), "commit".to_string(), "push".to_string(), "pull".to_string(), "checkout".to_string(), "branch".to_string(), "clone".to_string(), "merge".to_string(), "fetch".to_string(), "log".to_string()]);
+        commands.insert("apt".to_string(), vec!["install".to_string(), "update".to_string(), "upgrade".to_string(), "remove".to_string(), "search".to_string()]);
+        commands.insert("apt-get".to_string(), vec!["install".to_string(), "update".to_string(), "upgrade".to_string(), "remove".to_string()]);
+        commands.insert("npm".to_string(), vec!["install".to_string(), "run".to_string(), "start".to_string(), "test".to_string(), "build".to_string(), "init".to_string()]);
+        commands.insert("cargo".to_string(), vec!["build".to_string(), "run".to_string(), "test".to_string(), "check".to_string(), "add".to_string(), "publish".to_string()]);
+        commands.insert("ls".to_string(), vec!["-l".to_string(), "-a".to_string(), "-la".to_string(), "-h".to_string(), "--help".to_string()]);
+
+        let globals = vec![
+            "cd", "pwd", "grep", "cat", "vim", "nano", "top", "htop", "sudo", 
+            "dnf", "pacman", "ssh", "tar", "unzip", "curl", "wget", "find", "history", "clear", 
+            "exit", "chown", "chmod", "rm", "mv", "cp", "mkdir", "rmdir", "touch", 
+            "df", "du", "kill", "ps", "tail", "less", "awk", "sed", "python3", "node", 
+            "rsync", "scp", "ping", "netstat", "ip", "ifconfig", "journalctl",
+            "kubectl", "alias", "bash", "zsh"
+        ].into_iter().map(|s| s.to_string()).collect();
+
+        Self { globals, commands }
+    }
+}
+
+pub fn get_autocomplete_path(app: &AppHandle) -> PathBuf {
+    let mut path = app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("."));
+    path.push("autocomplete.json");
+    path
+}
+
+#[tauri::command]
+pub fn load_autocomplete(app: AppHandle) -> AutocompleteDict {
+    let path = get_autocomplete_path(&app);
+    if let Ok(data) = fs::read_to_string(&path) {
+        if let Ok(dict) = serde_json::from_str::<AutocompleteDict>(&data) {
+            return dict;
+        }
+    }
+    // If not exists or invalid, create default and persist it so user can edit later
+    let default_dict = AutocompleteDict::default();
+    let _ = save_autocomplete(app, default_dict.clone());
+    default_dict
+}
+
+#[tauri::command]
+pub fn save_autocomplete(app: AppHandle, dict: AutocompleteDict) -> Result<(), String> {
+    let path = get_autocomplete_path(&app);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let data = serde_json::to_string_pretty(&dict).map_err(|e| e.to_string())?;
     fs::write(path, data).map_err(|e| e.to_string())
 }
 

@@ -1,11 +1,25 @@
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use std::io::{Read, Write};
 use tauri::{AppHandle, Emitter};
-use ssh2::Session;
+use std::sync::OnceLock;
 use crate::settings_storage::log_debug;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use std::io::{Read, Write};
+use ssh2::Session;
+
+static SESSIONS: OnceLock<RwLock<HashMap<String, Arc<std::sync::Mutex<ssh2::Session>>>>> = OnceLock::new();
+
+pub fn get_sessions() -> &'static RwLock<HashMap<String, Arc<std::sync::Mutex<ssh2::Session>>>> {
+    SESSIONS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub async fn get_sftp_session(session_id: &str) -> Option<Arc<std::sync::Mutex<ssh2::Session>>> {
+    let map = get_sessions().read().await;
+    map.get(session_id).cloned()
+}
+
+type WriterMap = Arc<Mutex<HashMap<String, mpsc::Sender<SshAction>>>>;
 
 pub enum SshAction {
     Write(Vec<u8>),
@@ -13,13 +27,13 @@ pub enum SshAction {
 }
 
 pub struct SshState {
-    pub writers: Arc<Mutex<HashMap<String, mpsc::Sender<SshAction>>>>,
+    pub writers: WriterMap,
 }
 
 impl SshState {
     pub fn new() -> Self {
         Self {
-            writers: Arc::new(Mutex::new(HashMap::new())),
+            writers: Arc::new(Mutex::new(HashMap::<String, mpsc::Sender<SshAction>>::new())),
         }
     }
 }
@@ -48,12 +62,14 @@ pub async fn connect_ssh(
     password: Option<String>,
     private_key: Option<String>,
     auth_type: Option<String>,
+    cols: u32,
+    rows: u32,
 ) -> Result<(), String> {
     // WSL Routing
     if let Some(auth) = auth_type.as_ref() {
         if auth == "wsl" {
             // Using `host` as the distro name from the frontend setup
-            return crate::pty_manager::connect_wsl(app.clone(), state.clone(), session_id, host).await;
+            return crate::pty_manager::connect_wsl(app.clone(), state.clone(), session_id, host, cols, rows).await;
         }
     }
 
@@ -67,7 +83,7 @@ pub async fn connect_ssh(
         let connect_logic = || -> Result<(Session, ssh2::Channel), String> {
             log_debug(&app_handle, &format!("Connecting to {}:{}", host, port));
             let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| format!("Connect error: {}", e))?;
-            let mut sess = Session::new().map_err(|e| e.to_string())?;
+            let mut sess = Session::new().map_err(|e: ssh2::Error| e.to_string())?;
             sess.set_tcp_stream(tcp);
             log_debug(&app_handle, "Starting handshake");
             sess.handshake().map_err(|e| format!("Handshake error: {}", e))?;
@@ -97,8 +113,8 @@ pub async fn connect_ssh(
             }
 
             log_debug(&app_handle, "Authenticated! Requesting PTY...");
-            let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-            channel.request_pty("xterm", None, Some((80, 24, 0, 0))).map_err(|e| format!("PTY error: {}", e))?;
+            let mut channel = sess.channel_session().map_err(|e: ssh2::Error| e.to_string())?;
+            channel.request_pty("xterm-256color", None, Some((cols, rows, 0, 0))).map_err(|e| format!("PTY error: {}", e))?;
             channel.shell().map_err(|e| format!("Shell error: {}", e))?;
             log_debug(&app_handle, "Shell requested successfully.");
             
@@ -106,8 +122,19 @@ pub async fn connect_ssh(
         };
 
         match connect_logic() {
-            Ok((mut sess, mut channel)) => {
+            Ok((sess, mut channel)) => {
                 let _ = tx_result.send(Ok(()));
+                
+                // Store the SSH session globally for the SFTP Manager to spawn sub-channels
+                let arc_sess = Arc::new(std::sync::Mutex::new(sess));
+                
+                let arc_sess_clone_for_map: std::sync::Arc<std::sync::Mutex<ssh2::Session>> = arc_sess.clone();
+                let arc_session_id_clone_for_map: String = session_id.clone();
+                
+                // Vložíme Arc resferenci do globální mapy pro další použití
+                tokio::spawn(async move {
+                    get_sessions().write().await.insert(arc_session_id_clone_for_map, arc_sess_clone_for_map);
+                });
                 
                 // Pro kanál mezi UI a blokujícím vláknem 
                 let (tx, mut rx) = mpsc::channel::<SshAction>(32);
@@ -115,7 +142,8 @@ pub async fn connect_ssh(
                 let writers_clone = writers.clone();
                 
                 tokio::spawn(async move {
-                    writers_clone.lock().await.insert(sid_for_write, tx);
+                    let mut map = writers_clone.lock().await;
+                    map.insert(sid_for_write, tx);
                 });
 
                 // Oddělíme čtení a zápis
@@ -124,23 +152,62 @@ pub async fn connect_ssh(
                 let mut rx_bytes: u64 = 0;
                 let mut tx_bytes: u64 = 0;
                 let mut last_stats_emit = std::time::Instant::now();
+                let mut utf8_remainder: Vec<u8> = Vec::new();
                 
                 // Převedeme mut rx tokio receiver do blokučního
                 loop {
                     let mut buf = [0; 4096];
-                    sess.set_timeout(50); // Mírný timeout v ms pro čtení
                     
-                    match stream.read(&mut buf) {
+                    // Bezpečně uzamkneme session skrz Arc
+                    let read_res = if let Ok(mut locked_sess) = arc_sess.lock() {
+                        locked_sess.set_timeout(50); // Mírný timeout v ms pro čtení
+                        stream.read(&mut buf)
+                    } else {
+                        break; // Deadlock
+                    };
+                    
+                    match read_res {
                         Ok(0) => {
                             log_debug(&app_handle, "SSH stream reached EOF");
                             break;
                         }
                         Ok(n) => {
                             rx_bytes += n as u64;
-                            let _ = app_handle.emit("ssh-output", SshOutputPayload {
-                                session_id: sid_for_task.clone(),
-                                data: String::from_utf8_lossy(&buf[..n]).to_string(),
-                            });
+                            
+                            // Prepend any leftover bytes from the previous read
+                            let mut combined = std::mem::take(&mut utf8_remainder);
+                            combined.extend_from_slice(&buf[..n]);
+                            
+                            // Find the last valid UTF-8 boundary
+                            let valid_up_to = match std::str::from_utf8(&combined) {
+                                Ok(_) => combined.len(), // All bytes are valid UTF-8
+                                Err(e) => {
+                                    let valid = e.valid_up_to();
+                                    // Check if the error is at the end (incomplete sequence)
+                                    // vs in the middle (truly invalid byte)
+                                    if e.error_len().is_none() {
+                                        // Incomplete multi-byte sequence at the end
+                                        valid
+                                    } else {
+                                        // Truly invalid byte — skip it to avoid infinite loop
+                                        valid + e.error_len().unwrap()
+                                    }
+                                }
+                            };
+                            
+                            if valid_up_to > 0 {
+                                // SAFETY: we just verified this range is valid UTF-8
+                                let text = unsafe { std::str::from_utf8_unchecked(&combined[..valid_up_to]) };
+                                let _ = app_handle.emit("ssh-output", SshOutputPayload {
+                                    session_id: sid_for_task.clone(),
+                                    data: text.to_string(),
+                                });
+                            }
+                            
+                            // Store any trailing incomplete bytes for the next read
+                            if valid_up_to < combined.len() {
+                                utf8_remainder = combined[valid_up_to..].to_vec();
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
                             // Timeout passed without receiving new data
@@ -153,7 +220,10 @@ pub async fn connect_ssh(
 
                     // Vyčti frontu zápisů došlých z Tauri UI
                     while let Ok(action) = rx.try_recv() {
-                        sess.set_timeout(0); // Zruš timeout
+                        if let Ok(mut locked_sess) = arc_sess.lock() {
+                            locked_sess.set_timeout(0); // Zruš timeout
+                        }
+                        
                         match action {
                             SshAction::Write(data) => {
                                 if let Err(e) = stream.write_all(&data) {
@@ -169,7 +239,9 @@ pub async fn connect_ssh(
                                 }
                             }
                         }
-                        sess.set_timeout(50); // Obnov timeout
+                        if let Ok(mut locked_sess) = arc_sess.lock() {
+                            locked_sess.set_timeout(50); // Obnov timeout
+                        }
                     }
                     
                     // Emit stats periodically (every 1 second max) to avoid flooding the frontend
@@ -185,6 +257,14 @@ pub async fn connect_ssh(
 
                 log_debug(&app_handle, &format!("Loop ended, closing session {:?}", session_id));
                 let _ = app_handle.emit("ssh-terminated", session_id.clone());
+
+                let sid_cleanup = session_id.clone();
+                let writers_clone2 = writers.clone();
+                tokio::spawn(async move {
+                    let mut wc = writers_clone2.lock().await;
+                    wc.remove(&sid_cleanup);
+                    get_sessions().write().await.remove(&sid_cleanup);
+                });
             }
             Err(e) => {
                 log_debug(&app_handle, &format!("Connection Setup Failed: {}", e));
@@ -203,8 +283,9 @@ pub async fn write_stdin(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    if let Some(writer) = state.writers.lock().await.get(&session_id) {
-        writer.send(SshAction::Write(data.into_bytes())).await.map_err(|e| e.to_string())?;
+    let map = state.writers.lock().await;
+    if let Some(writer) = map.get(&session_id) {
+        writer.send(SshAction::Write(data.into_bytes())).await.map_err(|e: tokio::sync::mpsc::error::SendError<SshAction>| e.to_string())?;
         Ok(())
     } else {
         Err("Session not found".to_string())
@@ -218,8 +299,9 @@ pub async fn resize_pty(
     rows: u32,
     cols: u32,
 ) -> Result<(), String> {
-    if let Some(writer) = state.writers.lock().await.get(&session_id) {
-        writer.send(SshAction::Resize(cols, rows)).await.map_err(|e| e.to_string())?;
+    let map = state.writers.lock().await;
+    if let Some(writer) = map.get(&session_id) {
+        writer.send(SshAction::Resize(cols, rows)).await.map_err(|e: tokio::sync::mpsc::error::SendError<SshAction>| e.to_string())?;
         Ok(())
     } else {
         Err("Session not found".to_string())

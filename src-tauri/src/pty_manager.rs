@@ -1,7 +1,6 @@
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use std::thread;
 use tauri::{AppHandle, Emitter};
 
@@ -13,6 +12,8 @@ pub async fn connect_wsl(
     state: tauri::State<'_, SshState>,
     session_id: String,
     distro_name: String,
+    cols: u32,
+    rows: u32,
 ) -> Result<(), String> {
     log_debug(&app_handle, &format!("Attempting local PTY WSL connection to {}", distro_name));
 
@@ -21,8 +22,8 @@ pub async fn connect_wsl(
 
     // Create a new PTY pair
     let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
+        rows: rows as u16,
+        cols: cols as u16,
         pixel_width: 0,
         pixel_height: 0,
     }).map_err(|e| format!("Failed to open PTY: {}", e))?;
@@ -37,7 +38,8 @@ pub async fn connect_wsl(
     
     // Setup channels for writing to PTY
     let (tx_action, mut rx_action) = mpsc::channel::<SshAction>(32);
-    state.writers.lock().await.insert(session_id.clone(), tx_action);
+    let mut map = state.writers.lock().await;
+    map.insert(session_id.clone(), tx_action);
 
     // Keep handles for reading and writing
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -49,14 +51,38 @@ pub async fn connect_wsl(
     // Dedicated read thread (blocking read strategy similar to SSH)
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
+        let mut utf8_remainder: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    let _ = app_handle_read.emit("ssh-output", SshOutputPayload {
-                        session_id: sid_for_read.clone(),
-                        data: String::from_utf8_lossy(&buf[..n]).to_string(),
-                    });
+                    // Prepend any leftover bytes from the previous read
+                    let mut combined = std::mem::take(&mut utf8_remainder);
+                    combined.extend_from_slice(&buf[..n]);
+                    
+                    // Find the last valid UTF-8 boundary
+                    let valid_up_to = match std::str::from_utf8(&combined) {
+                        Ok(_) => combined.len(),
+                        Err(e) => {
+                            if e.error_len().is_none() {
+                                e.valid_up_to()
+                            } else {
+                                e.valid_up_to() + e.error_len().unwrap()
+                            }
+                        }
+                    };
+                    
+                    if valid_up_to > 0 {
+                        let text = unsafe { std::str::from_utf8_unchecked(&combined[..valid_up_to]) };
+                        let _ = app_handle_read.emit("ssh-output", SshOutputPayload {
+                            session_id: sid_for_read.clone(),
+                            data: text.to_string(),
+                        });
+                    }
+                    
+                    if valid_up_to < combined.len() {
+                        utf8_remainder = combined[valid_up_to..].to_vec();
+                    }
                 }
                 Err(e) => {
                     log_debug(&app_handle_read, &format!("PTY read error: {:?}", e));

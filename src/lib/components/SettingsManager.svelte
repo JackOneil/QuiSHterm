@@ -9,7 +9,8 @@
     highlights: [],
     folders: [],
     scrollback: 10000,
-    show_line_numbers: false
+    show_line_numbers: false,
+    enable_autocomplete: true
   };
   let settingsPath = "";
   let modalEl: HTMLElement;
@@ -137,6 +138,16 @@
           </div>
         {:else if activeTab === 'Terminal'}
           <div class="settings-group">
+            <h3>Autocomplete</h3>
+            <label class="toggle-row">
+              <span class="label-text">
+                <strong>Enable Smart Autocomplete</strong>
+                <span class="desc">Shows contextual floating dictionary popups while typing Linux/Bash commands.</span>
+              </span>
+              <input type="checkbox" bind:checked={settings.enable_autocomplete} />
+            </label>
+          </div>
+          <div class="settings-group mt-3">
             <h3>Scrollback Buffer</h3>
             <label class="toggle-row">
               <span class="label-text">

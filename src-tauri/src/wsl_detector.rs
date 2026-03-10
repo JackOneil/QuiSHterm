@@ -1,7 +1,7 @@
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use crate::settings_storage::log_debug;
 
 #[derive(serde::Serialize, Clone)]

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### [0.1.1] / [0.2.0] (Next Release) -> Iteration 9 & Polish
+- Removed:
+  * Removed recursive split tree rendering for stability.
+- Added:
+  * **Terminal Selection Context Menu**: Right-clicking inside the terminal now opens a custom context menu with `Copy`, `Paste`, and `Search on Web`. Web search opens the default browser with the selected text.
+  * **SFTP Visual Browser**: Right-click context option on any connected tab to open an interactive file tree modal.
+  * **Remote File Actions**: Supported recursive directory browsing, downloads to local machine, and fast uploads through Base64 payload encoding over the active SSH channel.
+  * **Visual Shell Autocomplete**: Added a floating overlay widget to `xterm.js` that tracks in-progress text and suggests standard Linux/Bash commands (e.g. `systemctl`, `docker`). Includes Up/Down arrow selection and Tab injection.
+    * Supports parameter autocomplete for commands like `systemctl`, `docker`, etc., generated on the fly after pressing space.
+    * The algorithm intelligently hides suggestions if the user's current parameter is already complete.
+    * Command dictionary was extracted to a modifiable `autocomplete.json` file in the application's config folder.
+    * Learning new commands: Unknown words can now be silently saved to the local dictionary using the `Shift+Tab` keyboard shortcut. This frees up the native `Tab` key for natural Linux path completion (e.g. `/var/log`).
+    * Implemented Levenshtein distance for fuzzy matching and improved suggestion relevance.
+### Changed
+* Added a toggle for smart command autocomplete (`Enable Smart Autocomplete`) in the `Terminal` section of the Settings window, responding instantly without reconnecting sessions.
+* The status bar now displays a small hint recommending the relevant keyboard shortcut.
+
+### Fixed
+* The Xterm terminal field border was adding a bottom offset that clipped the visualization of the last text line when the window was maximized. The issue was resolved by moving padding below a clean flex-wrapper (including `box-sizing: border-box`), which corrects the miscalculations from Xterm's internal `FitAddon` algorithm.
+* Line gutters would sometimes drift from the actual text due to flexbox formatting and browser rounding errors. Line numbers now use precise decimal cell height from the native grid and absolute positioning (`top: Npx` for each section), which completely eliminates cumulative height drift.
+* The floating autocomplete popup no longer jumps high up if it has only one item near the bottom edge of the window. Position is now controlled by real dynamic height estimation via Boundary Box rendering.
+* Navigation in bash history (arrow up/down) no longer falsely triggers the floating Autocomplete window, thus no longer blocking subsequent arrow key presses.
+* The WebGL renderer remains active for proper rendering of icons and Powerline/Nerd font glyphs in `oh-my-zsh`, but after history navigation the terminal now explicitly clears the texture atlas and repaints the viewport. This replaces the effect that previously required a window resize.
+* The terminal now also re-measures itself after fonts are loaded and prefers Powerline/Nerd Mono fonts so that the ZSH prompt uses stable cell metrics.
+* "Ghosting" artifacts when navigating bash history are finally resolved. The issue was caused by exotic characters (e.g. unicode arrows) that the browser natively treats as 1 pixel wide. The `unicode11` addon was installed to correctly map ZSH symbols (as 2-pixel wide characters), so backspace when deleting history finally reaches the first remaining character of the previous long word.
+* Fixed a fatal bug causing a blank black screen on terminal addon instantiation injection failure. The main rendering loop and session startup now successfully recover even if libraries fail.
+* Fixed a race condition causing a blank screen after connection. The `ssh-output` listener is now registered **before** calling `connect_ssh`, preventing loss of initial server output (MOTD/prompt).
+* Implemented proper connection teardown (e.g. when pressing `Ctrl+D` or typing `exit`). The status bar and "Tab" are no longer stuck in a false "Connected" state, but correctly destroy the session after channel termination from the Ubuntu/Linux server.
+
 ## [0.1.0] - 2026-03-08
 
 ### Added
