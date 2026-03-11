@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### [0.1.1] / [0.2.0] (Next Release) -> Iteration 9 & Polish
+## [0.2.0] - 2026-03-11
 - Removed:
   * Removed recursive split tree rendering for stability.
 - Added:
@@ -24,10 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     * Implemented Levenshtein distance for fuzzy matching and improved suggestion relevance.
 ### Changed
 * Reworked the connection editor into a more compact two-pane layout so additional connection options can be added without the form becoming visually heavy.
+* Saved connection cards are now denser and focus only on the connection name plus `host:port`, with connect/delete actions aligned on the right.
 * Added a toggle for smart command autocomplete (`Enable Smart Autocomplete`) in the `Terminal` section of the Settings window, responding instantly without reconnecting sessions.
 * The status bar now displays a small hint recommending the relevant keyboard shortcut.
+* The app version is now synchronized strictly from `package.json` into Tauri/Cargo metadata before dev and release builds so packaged binaries do not keep stale version numbers.
 
 ### Fixed
+* Split panes now render through the flex-based split tree again instead of flattened absolute positioning, and each terminal aggressively refits/repaints after pane layout changes. This resolves unreadable or partially missing text in the first pane until a manual window resize.
+* The desktop window now restores its previous size and maximized state after a full application restart instead of always reopening at the default small size.
+* Split operations no longer remount and reconnect the original pane session, so the existing terminal output and in-flight shell state stay intact when adding another pane.
+* Main window state restore is now applied from the Tauri backend during startup, which fixes the case where the app still reopened in the default small size.
 * Fixed the runtime password prompt so clicking into the password field no longer hands focus back to the terminal wrapper and prevents typing.
 * Fixed the WSL PTY path to propagate the selected connection terminal type via `TERM` instead of silently falling back to the default terminal setting.
 * Fixed stale connection profile usage during connect and reconnect flows so updated per-connection terminal types are reloaded from storage instead of reusing an older in-memory snapshot.

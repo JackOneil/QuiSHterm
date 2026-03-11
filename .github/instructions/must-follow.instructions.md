@@ -6,6 +6,11 @@ This file defines rules for any future modifications and interventions in the `Q
 - **Always update `CHANGELOG.md`:** As soon as you add new functionality, modify an existing feature, or fix a bug, you **must** write a clear note in the `CHANGELOG.md` file.
   - Use the appropriate section (Added, Changed, Deprecated, Removed, Fixed, Security).
   - The project strictly follows the **Keep a Changelog** format and **Semantic Versioning**.
+- **Versioning is strict and build-facing:** `package.json` is the **single source of truth** for the application version.
+  - Every release-worthy change must bump `package.json` using valid **Semantic Versioning**.
+  - Never edit `src-tauri/Cargo.toml` or `src-tauri/tauri.conf.json` version numbers manually without synchronizing them from `package.json`.
+  - Always run the project through the npm entrypoints (`npm run build`, `npm run tauri build`, `npm run tauri dev`), because they synchronize the version into the Rust/Tauri build metadata before packaging.
+  - The final packaged executable and installer must report the same version as `package.json`; shipping a build with stale version metadata is not acceptable.
 - **Always keep `README.md` up-to-date:** If your modification changes how the project runs, builds, or if you add a completely new core feature (e.g. a new UI window), update the *Features* or *Build Instructions* section in `README.md`.
 
 ## 2. Architecture and Project Structure (Where to Find What)

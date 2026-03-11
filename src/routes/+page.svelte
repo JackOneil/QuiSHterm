@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { Terminal as TerminalIcon, Settings, Plus, X, PanelRight, FolderPlus } from "lucide-svelte";
+  import { Terminal as TerminalIcon, Settings, Plus, X, PanelRight } from "lucide-svelte";
   import TerminalArea from "$lib/components/TerminalArea.svelte";
   import ConnectionManager from "$lib/components/ConnectionManager.svelte";
   import SettingsManager from "$lib/components/SettingsManager.svelte";
@@ -15,14 +16,20 @@
   let showSettings = false;
   let showSidebar = true;
   let activeTabId = "";
-  
-  export type SplitDirection = 'row' | 'col';
-  export interface SplitNode {
+
+  type SplitDirection = 'row' | 'col';
+  interface SplitNode {
     id: string;
     type: 'terminal' | 'split';
     direction?: SplitDirection;
     children?: SplitNode[];
     profile?: any;
+  }
+
+  interface Tab {
+    id: string;
+    title: string;
+    root: SplitNode;
   }
 
   interface PaneLeaf {
@@ -34,72 +41,79 @@
     h: number;
   }
 
+  interface SshStats {
+    tx: number;
+    rx: number;
+  }
+
   function getLeaves(node: SplitNode, x: number, y: number, w: number, h: number): PaneLeaf[] {
     if (node.type === 'terminal' || !node.children || node.children.length === 0) {
       return [{ id: node.id, profile: node.profile, x, y, w, h }];
     }
+
     let leaves: PaneLeaf[] = [];
+
     if (node.direction === 'row') {
-      let childW = w / node.children.length;
-      for (let i = 0; i < node.children.length; i++) {
-        leaves = leaves.concat(getLeaves(node.children[i], x + i * childW, y, childW, h));
+      const childWidth = w / node.children.length;
+      for (let index = 0; index < node.children.length; index += 1) {
+        leaves = leaves.concat(getLeaves(node.children[index], x + index * childWidth, y, childWidth, h));
       }
     } else {
-      let childH = h / node.children.length;
-      for (let i = 0; i < node.children.length; i++) {
-        leaves = leaves.concat(getLeaves(node.children[i], x, y + i * childH, w, childH));
+      const childHeight = h / node.children.length;
+      for (let index = 0; index < node.children.length; index += 1) {
+        leaves = leaves.concat(getLeaves(node.children[index], x, y + index * childHeight, w, childHeight));
       }
     }
+
     return leaves;
   }
 
-  interface Tab {
-    id: string;
-    title: string;
-    root: SplitNode;
-  }
-  
+  const appWindow = getCurrentWindow();
+
   let tabs: Tab[] = [];
   let unlistenTerminated: UnlistenFn | null = null;
   let unlistenStats: UnlistenFn | null = null;
-
-  // Stats state
-  interface SshStats { tx: number; rx: number; }
+  let unlistenWindowResize: UnlistenFn | null = null;
+  let windowStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let sessionStats: Record<string, SshStats> = {};
-
-  // Context menu state
+  let layoutVersion = 0;
   let contextMenu = { visible: false, x: 0, y: 0, tabId: "" };
   let renameInput = { visible: false, tabId: "", value: "" };
-
-  // SFTP state
   let sftpTargetTabId: string | null = null;
-  let sftpServerName: string = "";
-
-  // Connection State Tracking
+  let sftpServerName = "";
   let connectionStates: Record<string, boolean> = {};
-
-  onMount(async () => {
-    unlistenTerminated = await listen("ssh-terminated", (event) => {
-      const terminatedId = event.payload as string;
-      connectionStates[terminatedId] = false;
-      connectionStates = { ...connectionStates }; // trigger reactivity
-    });
-    unlistenStats = await listen("ssh-stats", (event: any) => {
-      const payload = event.payload;
-      sessionStats[payload.session_id] = { tx: payload.tx_bytes, rx: payload.rx_bytes };
-      sessionStats = { ...sessionStats }; // trigger reactivity
-    });
-    // Close context menu on click anywhere
-    document.addEventListener("click", closeContextMenu);
-  });
-
-  onDestroy(() => {
-    if (unlistenTerminated) unlistenTerminated();
-    if (unlistenStats) unlistenStats();
-    document.removeEventListener("click", closeContextMenu);
-  });
-
   let profileToEdit: any = null;
+
+  function focus(node: HTMLInputElement) {
+    node.focus();
+  }
+
+  async function saveWindowState() {
+    try {
+      const maximized = await appWindow.isMaximized();
+      const size = await appWindow.innerSize();
+
+      await invoke("save_window_state", {
+        windowState: {
+          width: size.width,
+          height: size.height,
+          maximized
+        }
+      });
+    } catch (error) {
+      console.error("Failed to persist the window state.", error);
+    }
+  }
+
+  function scheduleWindowStateSave() {
+    if (windowStateSaveTimer) {
+      clearTimeout(windowStateSaveTimer);
+    }
+
+    windowStateSaveTimer = setTimeout(() => {
+      void saveWindowState();
+    }, 180);
+  }
 
   function normalizeRuntimeProfile(profile: any) {
     if (!profile) return profile;
@@ -160,7 +174,7 @@
   async function handleConnect(event: CustomEvent<any>) {
     const profile = await resolveLatestProfile(event.detail);
     showManager = false;
-    
+
     const newTabId = `tab_${Date.now()}`;
     const newPaneId = `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     const rootNode: SplitNode = {
@@ -168,10 +182,11 @@
       type: 'terminal',
       profile
     };
+
     connectionStates[`${newTabId}_${newPaneId}`] = true;
     tabs = [...tabs, { id: newTabId, title: profile.name, root: rootNode }];
     activeTabId = newTabId;
-    // Refresh sidebar
+
     if (sidebarRef) sidebarRef.refresh();
   }
 
@@ -184,13 +199,14 @@
       type: 'terminal',
       profile
     };
+
     connectionStates[`${newTabId}_${newPaneId}`] = true;
     tabs = [...tabs, { id: newTabId, title: profile.name, root: rootNode }];
     activeTabId = newTabId;
   }
 
   function closeTab(id: string) {
-    tabs = tabs.filter(t => t.id !== id);
+    tabs = tabs.filter((tab) => tab.id !== id);
     if (activeTabId === id && tabs.length > 0) {
       activeTabId = tabs[tabs.length - 1].id;
     } else if (tabs.length === 0) {
@@ -200,14 +216,16 @@
     const prefix = `${id}_`;
     const newStats = { ...sessionStats };
     for (const key of Object.keys(newStats)) {
-      if (key.startsWith(prefix)) delete newStats[key];
+      if (key.startsWith(prefix)) {
+        delete newStats[key];
+      }
     }
     sessionStats = newStats;
   }
 
-  function handleTabContextMenu(e: MouseEvent, tabId: string) {
-    e.preventDefault();
-    contextMenu = { visible: true, x: e.clientX, y: e.clientY, tabId };
+  function handleTabContextMenu(event: MouseEvent, tabId: string) {
+    event.preventDefault();
+    contextMenu = { visible: true, x: event.clientX, y: event.clientY, tabId };
   }
 
   function closeContextMenu() {
@@ -215,116 +233,123 @@
   }
 
   async function reconnectTab(tabId: string) {
-    const tabIndex = tabs.findIndex(t => t.id === tabId);
+    const tabIndex = tabs.findIndex((tab) => tab.id === tabId);
     if (tabIndex === -1) return;
 
     const refreshedRoot = await refreshNodeProfiles(tabs[tabIndex].root);
-    
     const newId = `tab_${Date.now()}`;
     const updatedTab = { ...tabs[tabIndex], id: newId, root: refreshedRoot };
-    
+
     tabs = [
       ...tabs.slice(0, tabIndex),
       updatedTab,
       ...tabs.slice(tabIndex + 1)
     ];
-    
+
     if (activeTabId === tabId) {
       activeTabId = newId;
     }
-    
-    // Clear old stats logic based on compound pane id prefix
+
     const prefix = `${tabId}_`;
     const newStats = { ...sessionStats };
     for (const key of Object.keys(newStats)) {
-      if (key.startsWith(prefix)) delete newStats[key];
+      if (key.startsWith(prefix)) {
+        delete newStats[key];
+      }
     }
     sessionStats = newStats;
-    
+
     closeContextMenu();
   }
 
   function splitNode(node: SplitNode, targetId: string, direction: SplitDirection): SplitNode | null {
     if (node.id === targetId) {
       if (node.type !== 'terminal') return node;
-      
+
       const newPaneId = `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
       const newTerminalNode: SplitNode = {
         id: newPaneId,
         type: 'terminal',
         profile: node.profile
       };
+
       connectionStates[`${activeTabId}_${newPaneId}`] = true;
-      
+
       return {
         id: `s_${Date.now()}`,
         type: 'split',
         direction,
-        children: [
-          { ...node },
-          newTerminalNode
-        ]
+        children: [{ ...node }, newTerminalNode]
       };
     }
-    
+
     if (node.children) {
-      const newChildren = node.children.map(child => splitNode(child, targetId, direction)).filter(Boolean) as SplitNode[];
+      const newChildren = node.children
+        .map((child) => splitNode(child, targetId, direction))
+        .filter(Boolean) as SplitNode[];
+
       return { ...node, children: newChildren };
     }
-    
+
     return node;
   }
 
   function handleSplitDirect(id: string, direction: SplitDirection) {
     if (!activeTabId) return;
-    tabs = tabs.map(tab => {
+
+    tabs = tabs.map((tab) => {
       if (tab.id === activeTabId) {
         return { ...tab, root: splitNode(tab.root, id, direction)! };
       }
       return tab;
     });
+
+    layoutVersion += 1;
   }
 
   function removeNode(node: SplitNode, targetId: string): SplitNode | null {
     if (node.id === targetId) return null;
-    
+
     if (node.children) {
       const newChildren = node.children
-        .map(child => removeNode(child, targetId))
+        .map((child) => removeNode(child, targetId))
         .filter(Boolean) as SplitNode[];
-        
+
       if (newChildren.length === 0) return null;
-      if (newChildren.length === 1) return newChildren[0]; // flatten
-      
+      if (newChildren.length === 1) return newChildren[0];
+
       return { ...node, children: newChildren };
     }
-    
+
     return node;
   }
 
   function handleClosePaneDirect(id: string) {
     if (!activeTabId) return;
-    
+
     const compoundId = `${activeTabId}_${id}`;
     const newStats = { ...sessionStats };
     delete newStats[compoundId];
     sessionStats = newStats;
 
-    tabs = tabs.map(tab => {
+    tabs = tabs.map((tab) => {
       if (tab.id === activeTabId) {
         const newRoot = removeNode(tab.root, id);
         if (!newRoot) {
-           setTimeout(() => closeTab(tab.id), 0);
-           return tab;
+          setTimeout(() => closeTab(tab.id), 0);
+          return tab;
         }
+
         return { ...tab, root: newRoot };
       }
       return tab;
     });
+
+    layoutVersion += 1;
   }
 
   function startRename(tabId: string) {
-    const tab = tabs.find(t => t.id === tabId);
+    const tab = tabs.find((item) => item.id === tabId);
     if (tab) {
       renameInput = { visible: true, tabId, value: tab.title };
     }
@@ -333,45 +358,91 @@
 
   function finishRename() {
     if (renameInput.value.trim() !== "") {
-      tabs = tabs.map(t => t.id === renameInput.tabId ? { ...t, title: renameInput.value.trim() } : t);
+      tabs = tabs.map((tab) => tab.id === renameInput.tabId ? { ...tab, title: renameInput.value.trim() } : tab);
     }
     renameInput = { visible: false, tabId: "", value: "" };
   }
 
-  function handleRenameKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") finishRename();
-    if (e.key === "Escape") renameInput = { visible: false, tabId: "", value: "" };
+  function handleRenameKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter") finishRename();
+    if (event.key === "Escape") renameInput = { visible: false, tabId: "", value: "" };
+  }
+
+  function getFirstPaneSessionId(node: SplitNode, tabId: string): string | null {
+    if (node.type === 'terminal') {
+      return `${tabId}_${node.id}`;
+    }
+
+    if (!node.children || node.children.length === 0) {
+      return null;
+    }
+
+    for (const child of node.children) {
+      const sessionId = getFirstPaneSessionId(child, tabId);
+      if (sessionId) {
+        return sessionId;
+      }
+    }
+
+    return null;
   }
 
   function formatBytes(bytes: number) {
     if (bytes === 0) return '0 B';
-    const k = 1024;
+    const unit = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    const index = Math.floor(Math.log(bytes) / Math.log(unit));
+    return parseFloat((bytes / Math.pow(unit, index)).toFixed(2)) + ' ' + sizes[index];
   }
 
-  $: activeTab = tabs.find(t => t.id === activeTabId);
+  onMount(async () => {
+    unlistenTerminated = await listen("ssh-terminated", (event) => {
+      const terminatedId = event.payload as string;
+      connectionStates[terminatedId] = false;
+      connectionStates = { ...connectionStates };
+    });
+
+    unlistenStats = await listen("ssh-stats", (event: any) => {
+      const payload = event.payload;
+      sessionStats[payload.session_id] = { tx: payload.tx_bytes, rx: payload.rx_bytes };
+      sessionStats = { ...sessionStats };
+    });
+
+    document.addEventListener("click", closeContextMenu);
+    unlistenWindowResize = await appWindow.onResized(() => {
+      scheduleWindowStateSave();
+    });
+  });
+
+  onDestroy(() => {
+    if (unlistenTerminated) unlistenTerminated();
+    if (unlistenStats) unlistenStats();
+    if (unlistenWindowResize) unlistenWindowResize();
+    if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer);
+
+    document.removeEventListener("click", closeContextMenu);
+  });
+
+  $: activeTab = tabs.find((tab) => tab.id === activeTabId);
 </script>
 
 <main class="app-container">
-  <!-- Title/Tab Bar -->
   <header class="tab-bar" data-tauri-drag-region>
     <div class="tabs">
       {#each tabs as tab}
-        <div 
-          class="tab {activeTabId === tab.id ? 'active' : ''}" 
+        <div
+          class="tab {activeTabId === tab.id ? 'active' : ''}"
           on:click={() => activeTabId = tab.id}
-          on:contextmenu={(e) => handleTabContextMenu(e, tab.id)}
+          on:contextmenu={(event) => handleTabContextMenu(event, tab.id)}
           aria-hidden="true"
         >
           <div class="tab-content">
             <TerminalIcon size={14} class="icon" />
             {#if renameInput.visible && renameInput.tabId === tab.id}
-              <input 
-                class="rename-input" 
-                type="text" 
-                bind:value={renameInput.value} 
+              <input
+                class="rename-input"
+                type="text"
+                bind:value={renameInput.value}
                 on:blur={finishRename}
                 on:keydown={handleRenameKeydown}
                 use:focus
@@ -399,7 +470,6 @@
     </div>
   </header>
 
-  <!-- Main Content Area -->
   <div class="main-area">
     <div class="content-area">
       {#if tabs.length === 0 && !showManager}
@@ -413,44 +483,43 @@
       {/if}
 
       {#each tabs as tab (tab.id)}
-        <div class="terminal-wrapper" style="display: {activeTabId === tab.id ? 'block' : 'none'}; position: relative; width: 100%; height: 100%; overflow: hidden;">
-             {#each getLeaves(tab.root, 0, 0, 100, 100) as leaf (leaf.id)}
-                <div class="absolute-pane" style="left: {leaf.x}%; top: {leaf.y}%; width: {leaf.w}%; height: {leaf.h}%;">
-                   <div class="pane-controls">
-                       <button on:click={() => handleSplitDirect(leaf.id, 'row')} title="Split Right">
-                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="M12 3v18"/></svg>
-                       </button>
-                       <button on:click={() => handleSplitDirect(leaf.id, 'col')} title="Split Down">
-                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="M3 12h18"/></svg>
-                       </button>
-                       <button on:click={() => handleClosePaneDirect(leaf.id)} class="close-p" title="Close Pane">
-                         <X size={14} />
-                       </button>
-                   </div>
-                   <TerminalArea sessionId="{tab.id}_{leaf.id}" profile={leaf.profile} />
-                </div>
-             {/each}
+        <div class="terminal-wrapper" class:is-hidden={activeTabId !== tab.id}>
+          {#each getLeaves(tab.root, 0, 0, 100, 100) as leaf (leaf.id)}
+            <div class="absolute-pane" style="left: {leaf.x}%; top: {leaf.y}%; width: {leaf.w}%; height: {leaf.h}%">
+              <div class="pane-controls">
+                <button on:click={() => handleSplitDirect(leaf.id, 'row')} title="Split Right">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="M12 3v18"/></svg>
+                </button>
+                <button on:click={() => handleSplitDirect(leaf.id, 'col')} title="Split Down">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="M3 12h18"/></svg>
+                </button>
+                <button on:click={() => handleClosePaneDirect(leaf.id)} class="close-p" title="Close Pane">
+                  <X size={14} />
+                </button>
+              </div>
+              <TerminalArea sessionId="{tab.id}_{leaf.id}" profile={leaf.profile} layoutVersion={layoutVersion} />
+            </div>
+          {/each}
         </div>
       {/each}
     </div>
 
     {#if showSidebar}
-      <QuickConnect bind:this={sidebarRef} on:connect={handleQuickConnect} on:editProfile={(e) => openConnectionManager(e.detail)} />
+      <QuickConnect bind:this={sidebarRef} on:connect={handleQuickConnect} on:editProfile={(event) => openConnectionManager(event.detail)} />
     {/if}
   </div>
 
-  <!-- Context Menu -->
   {#if contextMenu.visible}
     <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px">
       <button class="context-item" on:click={() => startRename(contextMenu.tabId)}>Rename</button>
       <button class="context-item" on:click={() => reconnectTab(contextMenu.tabId)}>Reconnect</button>
       <button class="context-item" on:click={() => {
-        const t = tabs.find(x => x.id === contextMenu.tabId);
-        if (t) {
-          const leaves = getLeaves(t.root, 0, 0, 100, 100);
-          if (leaves.length > 0) {
-            sftpTargetTabId = `${t.id}_${leaves[0].id}`;
-            sftpServerName = t.title;
+        const tab = tabs.find((item) => item.id === contextMenu.tabId);
+        if (tab) {
+          const sessionId = getFirstPaneSessionId(tab.root, tab.id);
+          if (sessionId) {
+            sftpTargetTabId = sessionId;
+            sftpServerName = tab.title;
           }
         }
         closeContextMenu();
@@ -459,20 +528,19 @@
     </div>
   {/if}
 
-  <!-- SFTP Browser Modal -->
   {#if sftpTargetTabId}
-    <SftpBrowser 
-      sessionId={sftpTargetTabId} 
-      serverName={sftpServerName || "Server"} 
+    <SftpBrowser
+      sessionId={sftpTargetTabId}
+      serverName={sftpServerName || "Server"}
       on:close={() => sftpTargetTabId = null}
     />
   {/if}
 
   {#if showManager}
-    <ConnectionManager 
+    <ConnectionManager
       profileToEdit={profileToEdit}
-      on:connect={handleConnect} 
-      on:close={() => { showManager = false; profileToEdit = null; if(sidebarRef) sidebarRef.refresh(); }} 
+      on:connect={handleConnect}
+      on:close={() => { showManager = false; profileToEdit = null; if (sidebarRef) sidebarRef.refresh(); }}
     />
   {/if}
 
@@ -480,7 +548,6 @@
     <SettingsManager on:close={() => showSettings = false} />
   {/if}
 
-  <!-- Status Bar -->
   <footer class="status-bar">
     {#if activeTab}
       {#if connectionStates[`${activeTabId}_${activeTab.root.id}`] !== false}
@@ -500,14 +567,14 @@
       <div class="status-item text-muted" style="flex: 1; text-align: center; justify-content: center;">
         <i>Tip: Use <b>Shift+Tab</b> while typing an unknown command to learn it permanently into autocomplete dictionary</i>
       </div>
-      
-      {#if sessionStats && Object.keys(sessionStats).some(k => k.startsWith(`${activeTabId}_`))}
+
+      {#if sessionStats && Object.keys(sessionStats).some((key) => key.startsWith(`${activeTabId}_`))}
         <div class="status-divider"></div>
         <div class="status-item" title="Transmitted">
-          TX: <span class="stats-val">{formatBytes(Object.entries(sessionStats).filter(([k]) => k.startsWith(`${activeTabId}_`)).reduce((acc, [_, stats]) => acc + stats.tx, 0))}</span>
+          TX: <span class="stats-val">{formatBytes(Object.entries(sessionStats).filter(([key]) => key.startsWith(`${activeTabId}_`)).reduce((total, [, stats]) => total + stats.tx, 0))}</span>
         </div>
         <div class="status-item" title="Received">
-          RX: <span class="stats-val">{formatBytes(Object.entries(sessionStats).filter(([k]) => k.startsWith(`${activeTabId}_`)).reduce((acc, [_, stats]) => acc + stats.rx, 0))}</span>
+          RX: <span class="stats-val">{formatBytes(Object.entries(sessionStats).filter(([key]) => key.startsWith(`${activeTabId}_`)).reduce((total, [, stats]) => total + stats.rx, 0))}</span>
         </div>
       {/if}
     {:else}
@@ -697,6 +764,12 @@
   .terminal-wrapper {
     height: 100%;
     width: 100%;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .terminal-wrapper.is-hidden {
+    display: none;
   }
 
   .empty-state {
@@ -816,7 +889,7 @@
   .text-muted {
     color: var(--text-muted);
   }
-  /* Pane CSS */
+
   .absolute-pane {
     position: absolute;
     border: 1px solid var(--border);
@@ -827,6 +900,7 @@
     background: var(--bg-darker);
     z-index: 10;
   }
+
   .absolute-pane .pane-controls {
     position: absolute;
     top: 5px;
@@ -843,10 +917,12 @@
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     border: 1px solid var(--border);
   }
+
   .absolute-pane:hover .pane-controls {
     opacity: 1;
     pointer-events: auto;
   }
+
   .absolute-pane .pane-controls button {
     background: none;
     border: none;
@@ -860,10 +936,12 @@
     border-radius: 4px;
     transition: background-color 0.1s, color 0.1s;
   }
+
   .absolute-pane .pane-controls button:hover {
     color: var(--text-main);
     background-color: var(--bg-hover);
   }
+
   .absolute-pane .pane-controls .close-p:hover {
     color: #ef4444;
     background-color: rgba(239, 68, 68, 0.1);

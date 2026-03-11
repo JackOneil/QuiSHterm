@@ -1,14 +1,15 @@
 {
   "name": "quishterm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "QuiSHterm - SSH Terminal",
   "type": "module",
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build",
+    "dev": "node ./scripts/sync-version.mjs && vite dev",
+    "build": "node ./scripts/sync-version.mjs && vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "pretauri": "node ./scripts/sync-version.mjs",
     "tauri": "tauri"
   },
   "license": "MIT",

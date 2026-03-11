@@ -175,8 +175,7 @@
             <div class="profile-card {selectedProfileId === profile.id ? 'selected' : ''}">
               <button class="profile-main" type="button" on:click={() => selectProfile(profile)}>
                 <span class="profile-name"><Server size={14} class="mr-2" /> {profilePreview.name}</span>
-                <span class="profile-host">{profilePreview.user}@{profilePreview.host}:{profilePreview.port}</span>
-                <span class="profile-terminal">{profilePreview.terminal_type}</span>
+                <span class="profile-host">{profilePreview.host}:{profilePreview.port}</span>
               </button>
               <div class="profile-actions">
                 <button class="primary-btn sm" type="button" on:click={() => connectTo(profilePreview)}>Connect</button>
@@ -353,20 +352,21 @@
   }
 
   .profiles-list {
-    padding: 14px;
+    padding: 12px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     overflow-y: auto;
   }
 
   .profile-card {
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 10px;
     background: var(--bg-dark);
-    padding: 10px;
+    padding: 8px 10px;
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
     gap: 10px;
   }
 
@@ -381,11 +381,13 @@
     color: inherit;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 2px;
     align-items: flex-start;
     text-align: left;
     cursor: pointer;
-    padding: 2px;
+    padding: 0;
+    min-width: 0;
+    flex: 1 1 auto;
   }
 
   .profile-name {
@@ -393,18 +395,25 @@
     align-items: center;
     font-weight: 600;
     color: var(--text-main);
+    gap: 6px;
+    min-width: 0;
+    font-size: 13px;
   }
 
-  .profile-host,
-  .profile-terminal {
+  .profile-host {
     font-size: 12px;
     color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .profile-actions {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     justify-content: flex-end;
+    align-items: center;
+    flex-shrink: 0;
   }
 
   .editor-pane {

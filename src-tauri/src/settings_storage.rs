@@ -36,6 +36,13 @@ pub struct ConnectionFolder {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct WindowStateSettings {
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub debug_mode: bool,
     pub highlights: Vec<HighlightRule>,
@@ -47,6 +54,8 @@ pub struct AppSettings {
     pub show_line_numbers: bool,
     #[serde(default = "default_true")]
     pub enable_autocomplete: bool,
+    #[serde(default)]
+    pub window_state: Option<WindowStateSettings>,
 }
 
 fn default_scrollback() -> u32 {
@@ -92,6 +101,7 @@ impl Default for AppSettings {
             scrollback: 10000,
             show_line_numbers: false,
             enable_autocomplete: true,
+            window_state: None,
         }
     }
 }
@@ -247,6 +257,39 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
     }
     let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     fs::write(path, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn load_window_state(app: AppHandle) -> Option<WindowStateSettings> {
+    let settings = load_settings(app.clone());
+    if let Some(window_state) = settings.window_state.clone() {
+        log_debug(
+            &app,
+            &format!(
+                "Loaded saved window state: {}x{}, maximized={}",
+                window_state.width, window_state.height, window_state.maximized
+            ),
+        );
+        Some(window_state)
+    } else {
+        log_debug(&app, "No saved window state found.");
+        None
+    }
+}
+
+#[tauri::command]
+pub fn save_window_state(app: AppHandle, window_state: WindowStateSettings) -> Result<(), String> {
+    log_debug(
+        &app,
+        &format!(
+            "Saving window state: {}x{}, maximized={}",
+            window_state.width, window_state.height, window_state.maximized
+        ),
+    );
+
+    let mut settings = load_settings(app.clone());
+    settings.window_state = Some(window_state);
+    save_settings(app, settings)
 }
 
 #[derive(Serialize, Deserialize, Clone)]

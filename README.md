@@ -12,6 +12,7 @@ QuiSHterm is a modern, lightweight, and customizable SSH terminal built with Rus
 - **Customizable Highlights**: Color-code terminal output with user-defined regex rules (e.g., green for IP addresses, cyan for timestamps).
 - **Live Status Tracking**: Bottom status bar tracking sent/received (TX/RX) network data over SSH along with connection targets.
 - **Persistent Storage**: Safely manage SSH profiles and settings.
+- **Persistent Window State**: The desktop window restores its last saved size and maximized state on the next launch.
 - **PTY Resizing**: Terminal resize dynamics accurately reflected on the remote server.
 
 ## Building from source
@@ -47,7 +48,9 @@ A `Dockerfile.builder` is included in the root of the project.
    docker run --rm -v $(pwd):/app -e PKG_CONFIG_ALLOW_CROSS=1 -w /app tauri-builder npm run tauri build -- --target x86_64-pc-windows-gnu
    ```
 
-The compiled installer will be located in: `src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis/QuiSHterm_0.1.0_x64-setup.exe`
+The build entrypoints automatically synchronize the version from `package.json` into the Tauri and Cargo metadata before packaging, so the installer and final executable keep the same Semantic Version.
+
+The compiled installer will be located in: `src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis/QuiSHterm_<version>_x64-setup.exe`
 
 ## Technologies Used
 - Frontend: Svelte, Vite, xterm.js, lucide-svelte

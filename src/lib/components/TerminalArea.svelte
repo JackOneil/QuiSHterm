@@ -13,7 +13,9 @@
 
   export let sessionId: string;
   export let profile: any;
+  export let layoutVersion = 0;
 
+  let terminalOuter: HTMLElement;
   let terminalContainer: HTMLElement;
   let term: Terminal;
   let fitAddon: FitAddon;
@@ -30,6 +32,7 @@
   let settingsCheckInterval: ReturnType<typeof setInterval> | null = null;
   let contextMenuEl: HTMLElement;
   let resizeObserver: ResizeObserver | null = null;
+  let fitFrame: number | null = null;
   let passwordPromptInput: HTMLInputElement;
   let connectionPassword = profile?.password || "";
   let showPasswordPrompt = false;
@@ -62,6 +65,7 @@
   let isNavigatingHistory = false;
   let pendingHistoryRedrawRepair = false;
   let historyRedrawRepairTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastLayoutVersion = -1;
 
   const terminalFontFamily = "'MesloLGS NF', 'Meslo LG S DZ for Powerline', 'Hack Nerd Font Mono', 'CaskaydiaMono Nerd Font', 'Cascadia Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace";
 
@@ -233,6 +237,44 @@
     }, 120);
   }
 
+  function refreshTerminalViewport(forcePtyResize = false) {
+    if (!term || !fitAddon) return;
+
+    if (fitFrame !== null) {
+      cancelAnimationFrame(fitFrame);
+    }
+
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = null;
+
+      try {
+        fitAddon.fit();
+      } catch (e) {
+        console.warn("Terminal fit failed.", e);
+        return;
+      }
+
+      try {
+        term.clearTextureAtlas();
+      } catch (e) {
+        console.warn("Failed to clear terminal texture atlas during viewport refresh.", e);
+      }
+
+      term.refresh(0, Math.max(term.rows - 1, 0));
+      renderLineNumbers();
+
+      if (forcePtyResize && !isConnecting) {
+        invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch((e) => console.error("Resize error:", e));
+      }
+    });
+  }
+
+  $: if (term && layoutVersion !== lastLayoutVersion) {
+    lastLayoutVersion = layoutVersion;
+    setTimeout(() => refreshTerminalViewport(true), 0);
+    setTimeout(() => refreshTerminalViewport(true), 80);
+  }
+
   async function learnWord(word: string, type: "global" | "param" | null, ctx: string) {
     if (!type || !word) return;
     if (type === "global") {
@@ -282,10 +324,7 @@
       isConnecting = false;
 
       setTimeout(() => {
-        try {
-          fitAddon.fit();
-          invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch((e) => console.error(e));
-        } catch (e) {}
+        refreshTerminalViewport(true);
       }, 50);
     } catch (error: unknown) {
       const message = getConnectionErrorMessage(error);
@@ -406,9 +445,7 @@
     if (typeof document !== "undefined" && "fonts" in document) {
       document.fonts.ready.then(() => {
         if (!term) return;
-        fitAddon.fit();
-        term.clearTextureAtlas();
-        term.refresh(0, term.rows - 1);
+        refreshTerminalViewport(false);
       }).catch((e) => {
         console.warn("Font readiness check failed.", e);
       });
@@ -474,15 +511,12 @@
       return true;
     });
 
-    fitAddon.fit();
+    refreshTerminalViewport(false);
 
     resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit();
-      if (!isConnecting) {
-        invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch((e) => console.error("Resize error:", e));
-      }
-      renderLineNumbers();
+      refreshTerminalViewport(true);
     });
+    resizeObserver.observe(terminalOuter);
     resizeObserver.observe(terminalContainer);
 
     term.onScroll(() => {
@@ -667,6 +701,7 @@
     if (unlistenOutput) unlistenOutput();
     if (settingsCheckInterval) clearInterval(settingsCheckInterval);
     if (historyRedrawRepairTimer) clearTimeout(historyRedrawRepairTimer);
+    if (fitFrame !== null) cancelAnimationFrame(fitFrame);
     if (term) term.dispose();
   });
 
@@ -702,6 +737,7 @@
 
 <div
   class="terminal-outer"
+  bind:this={terminalOuter}
   role="button"
   tabindex="0"
   aria-label="SSH terminal"
@@ -799,6 +835,9 @@
     position: relative;
     width: 100%;
     height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
     background-color: var(--bg-darker);
     padding: 0px 4px 6px 4px;
     box-sizing: border-box;
