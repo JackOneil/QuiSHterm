@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { Eye, EyeOff, KeyRound } from "lucide-svelte";
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { WebglAddon } from "@xterm/addon-webgl";
@@ -17,7 +18,7 @@
   let term: Terminal;
   let fitAddon: FitAddon;
   let webglAddon: WebglAddon | null = null;
-  
+
   let unlistenOutput: UnlistenFn | null = null;
   let isConnecting = true;
   let connectionError = "";
@@ -29,6 +30,12 @@
   let settingsCheckInterval: ReturnType<typeof setInterval> | null = null;
   let contextMenuEl: HTMLElement;
   let resizeObserver: ResizeObserver | null = null;
+  let passwordPromptInput: HTMLInputElement;
+  let connectionPassword = profile?.password || "";
+  let showPasswordPrompt = false;
+  let passwordPromptValue = "";
+  let passwordPromptError = "";
+  let revealPromptPassword = false;
 
   let terminalContextMenu = {
     visible: false,
@@ -38,29 +45,31 @@
     selectionText: ""
   };
 
-  // Autocomplete state
   let currentWord = "";
   let showAutocomplete = false;
   let autocompleteX = 0;
   let autocompleteY = 0;
   let filteredSuggestions: string[] = [];
   let selectedAutocompleteIndex = 0;
-  
-  // Loaded via Tauri IPC
+
   let fullDict: any = { globals: [], commands: {} };
   let commandDict: Record<string, string[]> = {};
   let rootCommands: string[] = [];
-  
-  // Learning context
+
   let learnType: "global" | "param" | null = null;
   let learnCtx = "";
 
-  // History tracking state
   let isNavigatingHistory = false;
   let pendingHistoryRedrawRepair = false;
   let historyRedrawRepairTimer: ReturnType<typeof setTimeout> | null = null;
 
   const terminalFontFamily = "'MesloLGS NF', 'Meslo LG S DZ for Powerline', 'Hack Nerd Font Mono', 'CaskaydiaMono Nerd Font', 'Cascadia Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace";
+
+  function getConnectionErrorMessage(error: unknown): string {
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.message;
+    return String(error ?? "Unknown connection error");
+  }
 
   function getSelectedTerminalText(): string {
     if (!term) return "";
@@ -173,10 +182,28 @@
   }
 
   function handleTerminalKeydown(event: KeyboardEvent) {
-    if (event.key === "Enter" || event.key === " ") {
+    if (showPasswordPrompt) {
+      return;
+    }
+
+    if (event.key === "Enter") {
       event.preventDefault();
       term?.focus();
     }
+  }
+
+  function focusTerminal() {
+    if (showPasswordPrompt) {
+      return;
+    }
+
+    term?.focus();
+  }
+
+  async function focusPasswordPromptInput() {
+    await tick();
+    passwordPromptInput?.focus();
+    passwordPromptInput?.select();
   }
 
   function repairHistoryRedrawArtifacts() {
@@ -216,7 +243,7 @@
       if (!fullDict.commands[ctx]) fullDict.commands[ctx] = [];
       if (!fullDict.commands[ctx].includes(word)) fullDict.commands[ctx].push(word);
     }
-    
+
     try {
       await invoke("save_autocomplete", { dict: fullDict });
       commandDict = fullDict.commands || {};
@@ -226,10 +253,86 @@
     }
   }
 
-  onMount(async () => {
-    // 0. Load settings and Dictionary
+  async function connectSession(passwordOverride: string | null = null) {
     try {
-      let settings: any = await invoke("load_settings");
+      isConnecting = true;
+      connectionError = "";
+      const requestedTerminalType = profile.terminal_type || "xterm-256color";
+
+      term.writeln(`\x1b[34m[INFO]\x1b[0m Connecting to ${profile.user}@${profile.host}:${profile.port}...`);
+      term.writeln(`\x1b[34m[INFO]\x1b[0m Requested PTY terminal type: ${requestedTerminalType}`);
+
+      const passwordToUse = passwordOverride ?? connectionPassword;
+      await invoke("connect_ssh", {
+        sessionId,
+        host: profile.host,
+        port: Number(profile.port) || 22,
+        user: profile.user || "",
+        password: passwordToUse?.trim() ? passwordToUse : null,
+        privateKey: profile.private_key || null,
+        authType: profile.auth_type || null,
+        terminalType: requestedTerminalType,
+        cols: term.cols,
+        rows: term.rows
+      });
+
+      showPasswordPrompt = false;
+      passwordPromptError = "";
+      term.writeln(`\x1b[32m[SUCCESS]\x1b[0m Connected.\r\n`);
+      isConnecting = false;
+
+      setTimeout(() => {
+        try {
+          fitAddon.fit();
+          invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch((e) => console.error(e));
+        } catch (e) {}
+      }, 50);
+    } catch (error: unknown) {
+      const message = getConnectionErrorMessage(error);
+
+      if (message === "PASSWORD_REQUIRED") {
+        isConnecting = false;
+        showPasswordPrompt = true;
+        passwordPromptValue = "";
+        passwordPromptError = "";
+        revealPromptPassword = false;
+        term.writeln(`\r\n\x1b[33m[AUTH]\x1b[0m Password required for ${profile.user}@${profile.host}.`);
+        void focusPasswordPromptInput();
+        return;
+      }
+
+      if (message.startsWith("PASSWORD_AUTH_FAILED:")) {
+        isConnecting = false;
+        showPasswordPrompt = true;
+        passwordPromptError = message.replace("PASSWORD_AUTH_FAILED:", "").trim() || "Password authentication failed.";
+        term.writeln(`\r\n\x1b[31m[ERROR]\x1b[0m Password authentication failed.`);
+        void focusPasswordPromptInput();
+        return;
+      }
+
+      isConnecting = false;
+      connectionError = message;
+      term.writeln(`\r\n\x1b[31m[ERROR]\x1b[0m Connection failed: ${message}`);
+    }
+  }
+
+  async function submitPasswordPrompt() {
+    connectionPassword = passwordPromptValue;
+    passwordPromptError = "";
+    showPasswordPrompt = false;
+    await connectSession(passwordPromptValue);
+  }
+
+  function cancelPasswordPrompt() {
+    showPasswordPrompt = false;
+    passwordPromptError = "";
+    connectionError = "Password prompt cancelled.";
+    term.writeln(`\r\n\x1b[33m[INFO]\x1b[0m Password prompt cancelled.`);
+  }
+
+  onMount(async () => {
+    try {
+      const settings: any = await invoke("load_settings");
       highlights = settings.highlights || [];
       scrollback = settings.scrollback || 10000;
       showLineNumbers = settings.show_line_numbers || false;
@@ -238,7 +341,7 @@
       console.error("Failed to load settings in terminal area:", e);
     }
     try {
-      let dict: any = await invoke("load_autocomplete");
+      const dict: any = await invoke("load_autocomplete");
       fullDict = dict || { globals: [], commands: {} };
       commandDict = fullDict.commands || {};
       rootCommands = (fullDict.globals || []).concat(Object.keys(commandDict)).sort();
@@ -246,47 +349,44 @@
       console.error("Failed to load autocomplete dictionary:", e);
     }
 
-    // 1. Initialize xterm.js
     term = new Terminal({
       cursorBlink: true,
       fontFamily: terminalFontFamily,
       fontSize: 14,
-      scrollback: scrollback,
+      scrollback,
       theme: {
-        background: '#0d0e12',
-        foreground: '#e2e8f0',
-        cursor: '#3b82f6',
-        black: '#1e2029',
-        red: '#ef4444',
-        green: '#10b981',
-        yellow: '#f59e0b',
-        blue: '#3b82f6',
-        magenta: '#8b5cf6',
-        cyan: '#06b6d4',
-        white: '#cbd5e1',
-        brightBlack: '#64748b',
-        brightRed: '#f87171',
-        brightGreen: '#34d399',
-        brightYellow: '#fbbf24',
-        brightBlue: '#60a5fa',
-        brightMagenta: '#a78bfa',
-        brightCyan: '#22d3ee',
-        brightWhite: '#f8fafc',
+        background: "#0d0e12",
+        foreground: "#e2e8f0",
+        cursor: "#3b82f6",
+        black: "#1e2029",
+        red: "#ef4444",
+        green: "#10b981",
+        yellow: "#f59e0b",
+        blue: "#3b82f6",
+        magenta: "#8b5cf6",
+        cyan: "#06b6d4",
+        white: "#cbd5e1",
+        brightBlack: "#64748b",
+        brightRed: "#f87171",
+        brightGreen: "#34d399",
+        brightYellow: "#fbbf24",
+        brightBlue: "#60a5fa",
+        brightMagenta: "#a78bfa",
+        brightCyan: "#22d3ee",
+        brightWhite: "#f8fafc",
       }
     });
 
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
 
-    // Load Unicode 11 addon to correct character widths for Powerline/Nerd Fonts
     try {
       const unicode11Addon = new Unicode11Addon();
       term.loadAddon(unicode11Addon);
-      term.unicode.activeVersion = '11';
-    } catch(e) {
+      term.unicode.activeVersion = "11";
+    } catch (e) {
       console.warn("Unicode11 addon failed.", e);
     }
-
 
     term.open(terminalContainer);
 
@@ -303,7 +403,7 @@
     window.addEventListener("blur", closeTerminalContextMenu);
     window.addEventListener("resize", closeTerminalContextMenu);
 
-    if (typeof document !== 'undefined' && 'fonts' in document) {
+    if (typeof document !== "undefined" && "fonts" in document) {
       document.fonts.ready.then(() => {
         if (!term) return;
         fitAddon.fit();
@@ -313,11 +413,9 @@
         console.warn("Font readiness check failed.", e);
       });
     }
-    
-    // Intercept function keys and autocomplete selection
+
     term.attachCustomKeyEventHandler((e) => {
-      // Shift+Tab learning intercept
-      if (e.type === 'keydown' && e.shiftKey && e.code === 'Tab') {
+      if (e.type === "keydown" && e.shiftKey && e.code === "Tab") {
         if (enableAutocomplete && currentWord.trim().length >= 2) {
           learnWord(currentWord, learnType, learnCtx);
           showAutocomplete = false;
@@ -326,50 +424,49 @@
         return false;
       }
 
-      // Autocomplete interception (only if visible and rendering suggestions)
       if (enableAutocomplete && showAutocomplete && filteredSuggestions.length > 0) {
-        if (e.type === 'keydown') {
-          if (e.code === 'ArrowDown') {
+        if (e.type === "keydown") {
+          if (e.code === "ArrowDown") {
             selectedAutocompleteIndex = (selectedAutocompleteIndex + 1) % filteredSuggestions.length;
             e.preventDefault();
             return false;
-          } else if (e.code === 'ArrowUp') {
+          }
+          if (e.code === "ArrowUp") {
             selectedAutocompleteIndex = (selectedAutocompleteIndex - 1 + filteredSuggestions.length) % filteredSuggestions.length;
             e.preventDefault();
             return false;
-          } else if (e.code === 'Tab') {
-            let chosen = filteredSuggestions[selectedAutocompleteIndex];
-            let remainder = chosen.substring(currentWord.length);
+          }
+          if (e.code === "Tab") {
+            const chosen = filteredSuggestions[selectedAutocompleteIndex];
+            const remainder = chosen.substring(currentWord.length);
             invoke("write_stdin", { sessionId, data: remainder + " " }).catch(console.error);
             currentWord = "";
             showAutocomplete = false;
             e.preventDefault();
             return false;
-          } else if (e.code === 'Escape') {
+          }
+          if (e.code === "Escape") {
             showAutocomplete = false;
             currentWord = "";
           }
         }
       }
 
-      if (e.code === 'F10' || e.key === 'F10') {
-        if (e.type === 'keydown') {
+      if (e.code === "F10" || e.key === "F10") {
+        if (e.type === "keydown") {
           e.preventDefault();
         }
-        return true; 
+        return true;
       }
 
-      // History navigation tracking
-      if (e.type === 'keydown') {
-        if ((e.code === 'ArrowUp' || e.code === 'ArrowDown') && !showAutocomplete) {
+      if (e.type === "keydown") {
+        if ((e.code === "ArrowUp" || e.code === "ArrowDown") && !showAutocomplete) {
           isNavigatingHistory = true;
           markHistoryRedrawRepairNeeded();
-          return true; // Let xterm handle the history navigation
+          return true;
         }
-        
-        // Reset history navigation state on printable characters or backspace
-        // Ignore modifiers and pure navigation keys when resetting
-        if (e.key.length === 1 || e.code === 'Backspace' || e.code === 'Space') {
+
+        if (e.key.length === 1 || e.code === "Backspace" || e.code === "Space") {
           isNavigatingHistory = false;
         }
       }
@@ -379,22 +476,19 @@
 
     fitAddon.fit();
 
-    // 2. Resize handling
     resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
       if (!isConnecting) {
-        invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch(e => console.error("Resize error:", e));
+        invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch((e) => console.error("Resize error:", e));
       }
       renderLineNumbers();
     });
     resizeObserver.observe(terminalContainer);
 
-    // 3. Use xterm's native onScroll to sync line gutter
     term.onScroll(() => {
       renderLineNumbers();
     });
 
-    // Also listen to onRender for when terminal redraws (covers all cases)
     term.onRender(() => {
       renderLineNumbers();
     });
@@ -405,20 +499,18 @@
       }
     });
 
-    // 4. User input and Autocomplete tracking
     term.onData(async (data) => {
       try {
         await invoke("write_stdin", { sessionId, data });
-      } catch(e) {
+      } catch (e) {
         console.error("Write stdin error", e);
       }
     });
 
-    // Extract word matching dynamically off the echoed layout
     term.onCursorMove(() => {
       if (!enableAutocomplete || isNavigatingHistory) {
-         showAutocomplete = false;
-         return;
+        showAutocomplete = false;
+        return;
       }
 
       const buf = term.buffer.active;
@@ -426,52 +518,44 @@
       if (!lineObj) return;
 
       const text = lineObj.translateToString(true).substring(0, buf.cursorX);
-      
       const rawWords = text.split(/\s+/);
-      const words = rawWords.filter(w => w.length > 0);
+      const words = rawWords.filter((word) => word.length > 0);
       if (text.endsWith(" ") && words.length > 0) {
         words.push("");
       }
-      
+
       if (words.length === 0) {
         showAutocomplete = false;
         return;
       }
-      
+
       const lastWord = words[words.length - 1];
 
       let potentialCommand = "";
       let potentialCommandIndex = -1;
-      for (let i = words.length - 1; i >= 0; i--) {
-        if (words[i] !== lastWord && rootCommands.includes(words[i])) {
-          potentialCommand = words[i];
-          potentialCommandIndex = i;
+      for (let index = words.length - 1; index >= 0; index -= 1) {
+        if (words[index] !== lastWord && rootCommands.includes(words[index])) {
+          potentialCommand = words[index];
+          potentialCommandIndex = index;
           break;
         }
       }
 
       let suggestions: string[] = [];
-      let isParamCtx = (potentialCommandIndex !== -1 && words.length - 1 - potentialCommandIndex === 1);
-      
-      if (isParamCtx) {
-         if (commandDict[potentialCommand]) {
-           suggestions = commandDict[potentialCommand].filter(c => c.startsWith(lastWord) && c !== lastWord).sort();
-         }
-         learnType = "param";
-         learnCtx = potentialCommand;
-      } else {
-         if (lastWord.length > 0 && (potentialCommandIndex === -1 || words.length - 1 - potentialCommandIndex !== 1)) {
-           suggestions = rootCommands.filter(c => c.startsWith(lastWord) && c !== lastWord).sort();
-         }
-         learnType = "global";
-         learnCtx = "";
-      }
+      const isParamCtx = potentialCommandIndex !== -1 && words.length - 1 - potentialCommandIndex === 1;
 
-      let exactMatchFound = false;
       if (isParamCtx) {
-         exactMatchFound = commandDict[potentialCommand] && commandDict[potentialCommand].includes(lastWord);
+        if (commandDict[potentialCommand]) {
+          suggestions = commandDict[potentialCommand].filter((candidate) => candidate.startsWith(lastWord) && candidate !== lastWord).sort();
+        }
+        learnType = "param";
+        learnCtx = potentialCommand;
       } else {
-         exactMatchFound = rootCommands.includes(lastWord);
+        if (lastWord.length > 0 && (potentialCommandIndex === -1 || words.length - 1 - potentialCommandIndex !== 1)) {
+          suggestions = rootCommands.filter((candidate) => candidate.startsWith(lastWord) && candidate !== lastWord).sort();
+        }
+        learnType = "global";
+        learnCtx = "";
       }
 
       currentWord = lastWord;
@@ -481,18 +565,16 @@
         showAutocomplete = true;
         filteredSuggestions = suggestions;
         setTimeout(() => {
-          const textArea = terminalContainer.querySelector('.xterm-helper-textarea') as HTMLElement;
+          const textArea = terminalContainer.querySelector(".xterm-helper-textarea") as HTMLElement;
           if (textArea) {
             const rect = textArea.getBoundingClientRect();
-            // Estimate height based on items (approx 34px per item + 10px padding, max 250px)
             const estimatedHeight = Math.min(filteredSuggestions.length * 34 + 10, 250);
             autocompleteX = rect.left;
-            
-            // If it would cut off the bottom of the screen, render exactly above the cursor
+
             if (rect.bottom + estimatedHeight > window.innerHeight - 30) {
-               autocompleteY = rect.top - estimatedHeight - 10;
+              autocompleteY = rect.top - estimatedHeight - 10;
             } else {
-               autocompleteY = rect.bottom + 4;
+              autocompleteY = rect.bottom + 4;
             }
           }
         }, 10);
@@ -501,49 +583,47 @@
       }
     });
 
-    // 5. SSH output listener with write coalescing — registered BEFORE connect
-    // to avoid race condition where initial server output (MOTD/prompt) is lost.
     const ansiEscapeRegex = /(\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07]*\x07|\[\?[0-9;]*[hl]|\([ABCDEFGHIJKLMNOPQRSTUVWXYZaz01234567@]))/;
 
     function applyHighlights(text: string): string {
       if (highlights.length === 0) return text;
       let result = text;
-      for (const hl of highlights) {
+      for (const highlight of highlights) {
         try {
-          const hasSpecial = /[.*+?^${}()|[\]\\]/.test(hl.keyword);
-          const pattern = hasSpecial ? `(${hl.keyword})` : `\\b(${hl.keyword})\\b`;
-          const regex = new RegExp(pattern, 'g');
-          let colorCode = '31';
-          switch (hl.color) {
-            case 'red': colorCode = '31'; break;
-            case 'green': colorCode = '32'; break;
-            case 'yellow': colorCode = '33'; break;
-            case 'blue': colorCode = '34'; break;
-            case 'magenta': colorCode = '35'; break;
-            case 'cyan': colorCode = '36'; break;
+          const hasSpecial = /[.*+?^${}()|[\]\\]/.test(highlight.keyword);
+          const pattern = hasSpecial ? `(${highlight.keyword})` : `\\b(${highlight.keyword})\\b`;
+          const regex = new RegExp(pattern, "g");
+          let colorCode = "31";
+          switch (highlight.color) {
+            case "red": colorCode = "31"; break;
+            case "green": colorCode = "32"; break;
+            case "yellow": colorCode = "33"; break;
+            case "blue": colorCode = "34"; break;
+            case "magenta": colorCode = "35"; break;
+            case "cyan": colorCode = "36"; break;
           }
           result = result.replace(regex, `\x1b[1;${colorCode}m$1\x1b[0m`);
-        } catch(e) {}
+        } catch (e) {}
       }
       return result;
     }
 
-    let writeBuffer = '';
+    let writeBuffer = "";
     let flushScheduled = false;
 
     function flushWriteBuffer() {
       if (writeBuffer.length > 0 && term) {
         const segments = writeBuffer.split(ansiEscapeRegex);
-        let output = '';
-        for (const seg of segments) {
-          if (seg.startsWith('\x1b')) {
-            output += seg;
+        let output = "";
+        for (const segment of segments) {
+          if (segment.startsWith("\x1b")) {
+            output += segment;
           } else {
-            output += applyHighlights(seg);
+            output += applyHighlights(segment);
           }
         }
         term.write(output);
-        writeBuffer = '';
+        writeBuffer = "";
       }
       flushScheduled = false;
     }
@@ -559,54 +639,22 @@
       }
     });
 
-    // 6. Connect (listener is already active, no data will be lost)
-    try {
-      term.writeln(`\x1b[34m[INFO]\x1b[0m Connecting to ${profile.user}@${profile.host}:${profile.port}...`);
-      
-      await invoke("connect_ssh", {
-        sessionId,
-        host: profile.host,
-        port: Number(profile.port) || 22,
-        user: profile.user || "",
-        password: profile.password || null,
-        privateKey: profile.private_key || null,
-        authType: profile.auth_type || null,
-        cols: term.cols,
-        rows: term.rows
-      });
-      
-      term.writeln(`\x1b[32m[SUCCESS]\x1b[0m Connected.\r\n`);
-      isConnecting = false;
-      
-      // Delay initial resize slightly to let CSS/Flexbox settle entirely
-      setTimeout(() => {
-        try {
-          fitAddon.fit();
-          invoke("resize_pty", { sessionId, rows: term.rows, cols: term.cols }).catch(e => console.error(e));
-        } catch(e) {}
-      }, 50);
-      
-    } catch(e: any) {
-      isConnecting = false;
-      connectionError = e;
-      term.writeln(`\r\n\x1b[31m[ERROR]\x1b[0m Connection failed: ${e}`);
-    }
+    await connectSession();
 
-    // 7. Reactive settings poll for line numbers toggle + highlight changes
     settingsCheckInterval = setInterval(async () => {
       try {
-        let s: any = await invoke("load_settings");
-        const newVal = s.show_line_numbers || false;
-        if (newVal !== showLineNumbers) {
-          showLineNumbers = newVal;
+        const settings: any = await invoke("load_settings");
+        const newLineNumbersValue = settings.show_line_numbers || false;
+        if (newLineNumbersValue !== showLineNumbers) {
+          showLineNumbers = newLineNumbersValue;
           if (showLineNumbers) {
             await tick();
             renderLineNumbers();
           }
         }
-        enableAutocomplete = s.enable_autocomplete !== false;
-        highlights = s.highlights || [];
-      } catch(e) {}
+        enableAutocomplete = settings.enable_autocomplete !== false;
+        highlights = settings.highlights || [];
+      } catch (e) {}
     }, 2000);
   });
 
@@ -628,29 +676,26 @@
     const viewportY = buf.viewportY;
     const rows = term.rows;
 
-    // Detect actual line height pixel metric dynamically using floating-point rectangles rather than integers
-    let dynamicLineHeight = 16.8; // Safe generic fallback for 14px font
+    let dynamicLineHeight = 16.8;
     try {
-       // Prefer xterm's internal true measurement first to bypass browser rounding entirely
-       const coreHeight = (term as any)._core?._renderService?.dimensions?.css?.cell?.height;
-       if (coreHeight && coreHeight > 0) {
-           dynamicLineHeight = coreHeight;
-       } else {
-           const firstRowEl = terminalContainer.querySelector('.xterm-rows > div, .xterm-accessibility-tree > div') as HTMLElement;
-           if (firstRowEl) {
-             const rect = firstRowEl.getBoundingClientRect();
-             if (rect.height > 0) dynamicLineHeight = rect.height;
-           }
-       }
-    } catch(e) {}
+      const coreHeight = (term as any)._core?._renderService?.dimensions?.css?.cell?.height;
+      if (coreHeight && coreHeight > 0) {
+        dynamicLineHeight = coreHeight;
+      } else {
+        const firstRowEl = terminalContainer.querySelector(".xterm-rows > div, .xterm-accessibility-tree > div") as HTMLElement;
+        if (firstRowEl) {
+          const rect = firstRowEl.getBoundingClientRect();
+          if (rect.height > 0) dynamicLineHeight = rect.height;
+        }
+      }
+    } catch (e) {}
 
-    let html = '';
-    for (let i = 0; i < rows; i++) {
-      const lineNum = viewportY + i + 1;
-      // Use absolute tracking per-row to completely prevent subpixel browser stacking drifts from compounding
-      html += `<div class="ln" style="position: absolute; top: ${i * dynamicLineHeight}px; height: ${dynamicLineHeight}px; width: 100%; right: 0;">${lineNum}</div>`;
+    let html = "";
+    for (let index = 0; index < rows; index += 1) {
+      const lineNum = viewportY + index + 1;
+      html += `<div class="ln" style="position: absolute; top: ${index * dynamicLineHeight}px; height: ${dynamicLineHeight}px; width: 100%; right: 0;">${lineNum}</div>`;
     }
-    lineNumberEl.style.position = 'relative';
+    lineNumberEl.style.position = "relative";
     lineNumberEl.innerHTML = html;
   }
 </script>
@@ -660,7 +705,7 @@
   role="button"
   tabindex="0"
   aria-label="SSH terminal"
-  on:click={() => term && term.focus()}
+  on:click={focusTerminal}
   on:keydown={handleTerminalKeydown}
   on:contextmenu={handleTerminalContextMenu}
 >
@@ -689,16 +734,57 @@
       </button>
     </div>
   {/if}
-  
-  <AutocompleteOverlay 
+
+  {#if showPasswordPrompt}
+    <div class="password-prompt-backdrop" role="presentation" on:mousedown|stopPropagation on:click|stopPropagation>
+      <form class="password-prompt" on:submit|preventDefault={submitPasswordPrompt} on:mousedown|stopPropagation on:click|stopPropagation>
+        <div class="password-prompt-header">
+          <div class="password-prompt-title">
+            <KeyRound size={16} />
+            <span>Password Required</span>
+          </div>
+        </div>
+        <p class="password-prompt-copy">Agent/Pageant and key-based authentication were not accepted for {profile.user}@{profile.host}. Enter the account password to continue.</p>
+        <label class="password-prompt-label" for={`password-${sessionId}`}>Password</label>
+        <div class="password-prompt-input-row">
+          <input
+            id={`password-${sessionId}`}
+            class="password-prompt-input"
+            bind:this={passwordPromptInput}
+            type={revealPromptPassword ? "text" : "password"}
+            bind:value={passwordPromptValue}
+            autocomplete="current-password"
+            on:mousedown|stopPropagation
+            on:click|stopPropagation
+          />
+          <button class="password-visibility-btn" type="button" aria-label={revealPromptPassword ? 'Hide password' : 'Show password'} on:click={() => revealPromptPassword = !revealPromptPassword}>
+            {#if revealPromptPassword}
+              <EyeOff size={16} />
+            {:else}
+              <Eye size={16} />
+            {/if}
+          </button>
+        </div>
+        {#if passwordPromptError}
+          <div class="password-prompt-error">{passwordPromptError}</div>
+        {/if}
+        <div class="password-prompt-actions">
+          <button class="terminal-context-item prompt-secondary" type="button" on:click={cancelPasswordPrompt}>Cancel</button>
+          <button class="terminal-context-item prompt-primary" type="submit">Connect</button>
+        </div>
+      </form>
+    </div>
+  {/if}
+
+  <AutocompleteOverlay
     bind:visible={showAutocomplete}
     x={autocompleteX}
     y={autocompleteY}
     suggestions={filteredSuggestions}
     selectedIndex={selectedAutocompleteIndex}
-    on:select={(e) => {
-      let chosen = e.detail;
-      let remainder = chosen.substring(currentWord.length);
+    on:select={(event) => {
+      const chosen = event.detail;
+      const remainder = chosen.substring(currentWord.length);
       invoke("write_stdin", { sessionId, data: remainder + " " }).catch(console.error);
       currentWord = "";
       showAutocomplete = false;
@@ -790,14 +876,133 @@
     cursor: not-allowed;
   }
 
+  .password-prompt-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 1450;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(6, 8, 12, 0.68);
+    backdrop-filter: blur(6px);
+  }
+
+  .password-prompt {
+    width: min(420px, calc(100% - 32px));
+    padding: 18px;
+    border-radius: 14px;
+    border: 1px solid #283244;
+    background: #11151d;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .password-prompt-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .password-prompt-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    color: #f8fafc;
+  }
+
+  .password-prompt-copy {
+    margin: 0;
+    color: #94a3b8;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .password-prompt-label {
+    font-size: 12px;
+    color: #cbd5e1;
+  }
+
+  .password-prompt-input-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .password-prompt-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #334155;
+    background: #0d0e12;
+    color: #f8fafc;
+    font: inherit;
+    outline: none;
+  }
+
+  .password-prompt-input:focus {
+    border-color: #3b82f6;
+  }
+
+  .password-visibility-btn {
+    width: 40px;
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    border: 1px solid #334155;
+    background: #0d0e12;
+    color: #dbe4f0;
+    cursor: pointer;
+  }
+
+  .password-visibility-btn:hover {
+    background: #172033;
+  }
+
+  .password-prompt-error {
+    font-size: 12px;
+    color: #fca5a5;
+  }
+
+  .password-prompt-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .prompt-secondary,
+  .prompt-primary {
+    width: auto;
+    min-width: 100px;
+    justify-content: center;
+  }
+
+  .prompt-secondary {
+    border: 1px solid #334155;
+  }
+
+  .prompt-primary {
+    background: #2563eb;
+  }
+
+  .prompt-primary:hover {
+    background: #1d4ed8;
+  }
+
   :global(.xterm-viewport::-webkit-scrollbar) {
     width: 8px;
   }
-  
+
   :global(.xterm-viewport::-webkit-scrollbar-track) {
     background: transparent;
   }
-  
+
   :global(.xterm-viewport::-webkit-scrollbar-thumb) {
     background-color: #334155;
     border-radius: 4px;

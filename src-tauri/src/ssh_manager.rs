@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use std::sync::OnceLock;
@@ -7,6 +8,9 @@ use crate::settings_storage::log_debug;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use std::io::{Read, Write};
 use ssh2::Session;
+
+const PASSWORD_REQUIRED_CODE: &str = "PASSWORD_REQUIRED";
+const PASSWORD_AUTH_FAILED_CODE: &str = "PASSWORD_AUTH_FAILED";
 
 static SESSIONS: OnceLock<RwLock<HashMap<String, Arc<std::sync::Mutex<ssh2::Session>>>>> = OnceLock::new();
 
@@ -51,6 +55,116 @@ pub struct SshStatsPayload {
     pub rx_bytes: u64,
 }
 
+fn resolve_private_key_path(key_path_str: &str) -> PathBuf {
+    if key_path_str.starts_with("~/") {
+        let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+        path.push(key_path_str.trim_start_matches("~/"));
+        path
+    } else {
+        PathBuf::from(key_path_str)
+    }
+}
+
+fn default_key_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let Some(home_dir) = dirs::home_dir() else {
+        return candidates;
+    };
+
+    let ssh_dir = home_dir.join(".ssh");
+    for name in [
+        "id_ed25519",
+        "id_ecdsa",
+        "id_ecdsa_sk",
+        "id_rsa",
+        "id_dsa",
+        "id_xmss",
+        "identity",
+    ] {
+        let path = ssh_dir.join(name);
+        if path.exists() {
+            candidates.push(path);
+        }
+    }
+
+    candidates
+}
+
+fn try_agent_auth(sess: &Session, user: &str, app: &AppHandle) -> bool {
+    #[cfg(target_os = "windows")]
+    log_debug(app, "Attempting Pageant/SSH agent authentication.");
+    #[cfg(not(target_os = "windows"))]
+    log_debug(app, "Attempting SSH agent authentication.");
+
+    let mut agent = match sess.agent() {
+        Ok(agent) => agent,
+        Err(e) => {
+            log_debug(app, &format!("SSH agent unavailable: {}", e));
+            return false;
+        }
+    };
+
+    if let Err(e) = agent.connect() {
+        log_debug(app, &format!("SSH agent connect failed: {}", e));
+        return false;
+    }
+
+    if let Err(e) = agent.list_identities() {
+        log_debug(app, &format!("SSH agent identity listing failed: {}", e));
+        return false;
+    }
+
+    let identities = match agent.identities() {
+        Ok(identities) => identities,
+        Err(e) => {
+            log_debug(app, &format!("SSH agent identities could not be read: {}", e));
+            return false;
+        }
+    };
+
+    if identities.is_empty() {
+        log_debug(app, "SSH agent returned no identities.");
+        return false;
+    }
+
+    for (index, identity) in identities.iter().enumerate() {
+        log_debug(app, &format!("Trying SSH agent identity #{}.", index + 1));
+        match agent.userauth(user, identity) {
+            Ok(_) if sess.authenticated() => {
+                log_debug(app, &format!("SSH agent authentication succeeded with identity #{}.", index + 1));
+                return true;
+            }
+            Ok(_) => {
+                log_debug(app, &format!("SSH agent identity #{} returned without authenticating.", index + 1));
+            }
+            Err(e) => {
+                log_debug(app, &format!("SSH agent identity #{} failed: {}", index + 1, e));
+            }
+        }
+    }
+
+    false
+}
+
+fn try_pubkey_auth(sess: &Session, user: &str, key_path: &Path, passphrase: Option<&str>, app: &AppHandle, source: &str) -> bool {
+    log_debug(app, &format!("Attempting public key authentication using {}: {}", source, key_path.to_string_lossy()));
+
+    match sess.userauth_pubkey_file(user, None, key_path, passphrase) {
+        Ok(_) if sess.authenticated() => {
+            log_debug(app, &format!("Public key authentication succeeded using {}.", source));
+            true
+        }
+        Ok(_) => {
+            log_debug(app, &format!("Public key authentication using {} returned without authenticating.", source));
+            false
+        }
+        Err(e) => {
+            log_debug(app, &format!("Public key authentication using {} failed: {}", source, e));
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn connect_ssh(
     app: AppHandle,
@@ -62,6 +176,7 @@ pub async fn connect_ssh(
     password: Option<String>,
     private_key: Option<String>,
     auth_type: Option<String>,
+    terminal_type: Option<String>,
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
@@ -69,7 +184,7 @@ pub async fn connect_ssh(
     if let Some(auth) = auth_type.as_ref() {
         if auth == "wsl" {
             // Using `host` as the distro name from the frontend setup
-            return crate::pty_manager::connect_wsl(app.clone(), state.clone(), session_id, host, cols, rows).await;
+            return crate::pty_manager::connect_wsl(app.clone(), state.clone(), session_id, host, terminal_type.clone(), cols, rows).await;
         }
     }
 
@@ -81,6 +196,15 @@ pub async fn connect_ssh(
     // Zabalíme celou SSH logiku do blokujícího threadu
     tokio::task::spawn_blocking(move || {
         let connect_logic = || -> Result<(Session, ssh2::Channel), String> {
+            let auth_password = password.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+            let passphrase = auth_password.as_deref();
+            let requested_terminal = terminal_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("xterm-256color")
+                .to_string();
+
             log_debug(&app_handle, &format!("Connecting to {}:{}", host, port));
             let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| format!("Connect error: {}", e))?;
             let mut sess = Session::new().map_err(|e: ssh2::Error| e.to_string())?;
@@ -88,33 +212,67 @@ pub async fn connect_ssh(
             log_debug(&app_handle, "Starting handshake");
             sess.handshake().map_err(|e| format!("Handshake error: {}", e))?;
 
-            if let Some(key_path_str) = private_key.filter(|k| !k.trim().is_empty()) {
-                log_debug(&app_handle, &format!("Attempting public key auth with: {}", key_path_str));
-                let path = if key_path_str.starts_with("~/") {
-                    let mut p = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
-                    p.push(key_path_str.trim_start_matches("~/"));
-                    p
-                } else {
-                    std::path::PathBuf::from(&key_path_str)
-                };
-
-                let pass_ref = password.as_deref().filter(|p| !p.trim().is_empty());
-                sess.userauth_pubkey_file(&user, None, &path, pass_ref)
-                    .map_err(|e| format!("Pubkey Auth error: {}", e))?;
-            } else if let Some(pass) = password.filter(|p| !p.trim().is_empty()) {
-                log_debug(&app_handle, "Attempting password auth");
-                sess.userauth_password(&user, &pass).map_err(|e| format!("Password Auth error: {}", e))?;
-            } else {
-                return Err("Password or Private Key required".to_string());
+            match sess.auth_methods(&user) {
+                Ok(methods) => log_debug(&app_handle, &format!("Server auth methods: {}", methods)),
+                Err(e) => log_debug(&app_handle, &format!("Could not read server auth methods: {}", e)),
             }
 
-            if !sess.authenticated() {
+            let mut authenticated = try_agent_auth(&sess, &user, &app_handle);
+
+            if !authenticated {
+                if let Some(key_path_str) = private_key.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                    let path = resolve_private_key_path(key_path_str);
+                    authenticated = try_pubkey_auth(&sess, &user, &path, passphrase, &app_handle, "configured key");
+                }
+            }
+
+            if !authenticated {
+                let configured_key = private_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(resolve_private_key_path);
+
+                for candidate in default_key_candidates() {
+                    if configured_key.as_ref().is_some_and(|configured| configured == &candidate) {
+                        continue;
+                    }
+
+                    if try_pubkey_auth(&sess, &user, &candidate, passphrase, &app_handle, "default ~/.ssh key") {
+                        authenticated = true;
+                        break;
+                    }
+                }
+            }
+
+            if !authenticated {
+                if let Some(pass) = auth_password.as_deref() {
+                    log_debug(&app_handle, "Attempting password authentication.");
+                    sess.userauth_password(&user, pass)
+                        .map_err(|e| format!("{}:{}", PASSWORD_AUTH_FAILED_CODE, e))?;
+
+                    if !sess.authenticated() {
+                        return Err(format!("{}:Authentication failed", PASSWORD_AUTH_FAILED_CODE));
+                    }
+                    authenticated = true;
+                    log_debug(&app_handle, "Password authentication succeeded.");
+                } else {
+                    log_debug(&app_handle, "Authentication requires a password prompt after agent/key attempts.");
+                    return Err(PASSWORD_REQUIRED_CODE.to_string());
+                }
+            }
+
+            if !authenticated || !sess.authenticated() {
                 return Err("Authentication failed".to_string());
             }
 
-            log_debug(&app_handle, "Authenticated! Requesting PTY...");
+            log_debug(&app_handle, &format!("Authenticated. Requesting PTY with terminal type {}.", requested_terminal));
             let mut channel = sess.channel_session().map_err(|e: ssh2::Error| e.to_string())?;
-            channel.request_pty("xterm-256color", None, Some((cols, rows, 0, 0))).map_err(|e| format!("PTY error: {}", e))?;
+            channel.request_pty(&requested_terminal, None, Some((cols, rows, 0, 0))).map_err(|e| format!("PTY error: {}", e))?;
+            match channel.setenv("TERM", &requested_terminal) {
+                Ok(_) => log_debug(&app_handle, &format!("Exported TERM={} on SSH channel.", requested_terminal)),
+                Err(e) => log_debug(&app_handle, &format!("SSH server rejected TERM export for {}: {}", requested_terminal, e)),
+            }
             channel.shell().map_err(|e| format!("Shell error: {}", e))?;
             log_debug(&app_handle, "Shell requested successfully.");
             

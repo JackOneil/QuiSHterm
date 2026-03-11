@@ -1,8 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
+
+const SETTINGS_FILE_NAME: &str = "settings.json";
+const AUTOCOMPLETE_FILE_NAME: &str = "autocomplete.json";
+const STORAGE_LOCATION_FILE_NAME: &str = "storage-location.json";
+
+#[derive(Serialize, Deserialize, Clone)]
+struct StorageLocation {
+    pub custom_config_dir: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StoragePathInfo {
+    pub config_dir: String,
+    pub default_config_dir: String,
+    pub settings_file: String,
+    pub is_custom: bool,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HighlightRule {
@@ -79,9 +96,83 @@ impl Default for AppSettings {
     }
 }
 
+fn get_default_config_dir(app: &AppHandle) -> PathBuf {
+    app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn get_storage_location_path(app: &AppHandle) -> PathBuf {
+    let mut path = get_default_config_dir(app);
+    path.push(STORAGE_LOCATION_FILE_NAME);
+    path
+}
+
+fn load_storage_location(app: &AppHandle) -> Option<PathBuf> {
+    let locator_path = get_storage_location_path(app);
+    let data = fs::read_to_string(locator_path).ok()?;
+    let location = serde_json::from_str::<StorageLocation>(&data).ok()?;
+    let custom_path = location.custom_config_dir?.trim().to_string();
+    if custom_path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(custom_path))
+    }
+}
+
+pub fn get_config_root(app: &AppHandle) -> PathBuf {
+    load_storage_location(app).unwrap_or_else(|| get_default_config_dir(app))
+}
+
+pub fn ensure_config_root(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|e| format!("Failed to create config directory: {}", e))
+}
+
+fn persist_storage_location(app: &AppHandle, custom_dir: Option<&Path>) -> Result<(), String> {
+    let default_dir = get_default_config_dir(app);
+    ensure_config_root(&default_dir)?;
+
+    let locator_path = get_storage_location_path(app);
+    if let Some(path) = custom_dir {
+        let payload = StorageLocation {
+            custom_config_dir: Some(path.to_string_lossy().to_string()),
+        };
+        let data = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+        fs::write(locator_path, data).map_err(|e| format!("Failed to write storage locator: {}", e))?;
+    } else if locator_path.exists() {
+        fs::remove_file(locator_path).map_err(|e| format!("Failed to remove storage locator: {}", e))?;
+    }
+
+    Ok(())
+}
+
+fn migrate_config_files(from_root: &Path, to_root: &Path) -> Result<(), String> {
+    if from_root == to_root {
+        return Ok(());
+    }
+
+    ensure_config_root(to_root)?;
+
+    for file_name in [SETTINGS_FILE_NAME, "profiles.json", AUTOCOMPLETE_FILE_NAME] {
+        let from_path = from_root.join(file_name);
+        let to_path = to_root.join(file_name);
+        if from_path.exists() {
+            fs::copy(&from_path, &to_path).map_err(|e| {
+                format!(
+                    "Failed to migrate {} from {} to {}: {}",
+                    file_name,
+                    from_path.to_string_lossy(),
+                    to_path.to_string_lossy(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn get_settings_path(app: &AppHandle) -> PathBuf {
-    let mut path = app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("."));
-    path.push("settings.json");
+    let mut path = get_config_root(app);
+    path.push(SETTINGS_FILE_NAME);
     path
 }
 
@@ -89,6 +180,43 @@ pub fn get_settings_path(app: &AppHandle) -> PathBuf {
 pub fn get_settings_path_info(app: AppHandle) -> String {
     let path = get_settings_path(&app);
     path.to_string_lossy().to_string()
+}
+
+#[tauri::command]
+pub fn get_storage_path_info(app: AppHandle) -> StoragePathInfo {
+    let default_dir = get_default_config_dir(&app);
+    let config_dir = get_config_root(&app);
+    let settings_file = config_dir.join(SETTINGS_FILE_NAME);
+
+    StoragePathInfo {
+        config_dir: config_dir.to_string_lossy().to_string(),
+        default_config_dir: default_dir.to_string_lossy().to_string(),
+        settings_file: settings_file.to_string_lossy().to_string(),
+        is_custom: config_dir != default_dir,
+    }
+}
+
+#[tauri::command]
+pub fn set_config_directory(app: AppHandle, directory: Option<String>) -> Result<StoragePathInfo, String> {
+    let current_root = get_config_root(&app);
+    let default_root = get_default_config_dir(&app);
+    let target_root = match directory {
+        Some(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
+        _ => default_root.clone(),
+    };
+
+    ensure_config_root(&target_root)?;
+    migrate_config_files(&current_root, &target_root)?;
+
+    if target_root == default_root {
+        persist_storage_location(&app, None)?;
+        log_debug(&app, &format!("Config directory reset to default: {}", target_root.to_string_lossy()));
+    } else {
+        persist_storage_location(&app, Some(&target_root))?;
+        log_debug(&app, &format!("Config directory changed to: {}", target_root.to_string_lossy()));
+    }
+
+    Ok(get_storage_path_info(app))
 }
 
 #[tauri::command]
@@ -115,7 +243,7 @@ pub fn load_settings(app: AppHandle) -> AppSettings {
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let path = get_settings_path(&app);
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        ensure_config_root(parent)?;
     }
     let data = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     fs::write(path, data).map_err(|e| e.to_string())
@@ -154,8 +282,8 @@ impl Default for AutocompleteDict {
 }
 
 pub fn get_autocomplete_path(app: &AppHandle) -> PathBuf {
-    let mut path = app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("."));
-    path.push("autocomplete.json");
+    let mut path = get_config_root(app);
+    path.push(AUTOCOMPLETE_FILE_NAME);
     path
 }
 
@@ -177,7 +305,7 @@ pub fn load_autocomplete(app: AppHandle) -> AutocompleteDict {
 pub fn save_autocomplete(app: AppHandle, dict: AutocompleteDict) -> Result<(), String> {
     let path = get_autocomplete_path(&app);
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        ensure_config_root(parent)?;
     }
     let data = serde_json::to_string_pretty(&dict).map_err(|e| e.to_string())?;
     fs::write(path, data).map_err(|e| e.to_string())

@@ -12,10 +12,17 @@ pub async fn connect_wsl(
     state: tauri::State<'_, SshState>,
     session_id: String,
     distro_name: String,
+    terminal_type: Option<String>,
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
     log_debug(&app_handle, &format!("Attempting local PTY WSL connection to {}", distro_name));
+    let requested_terminal = terminal_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("xterm-256color")
+        .to_string();
 
     // Create the PTY system
     let pty_system = NativePtySystem::default();
@@ -31,6 +38,8 @@ pub async fn connect_wsl(
     let mut cmd = CommandBuilder::new("wsl.exe");
     cmd.arg("-d");
     cmd.arg(&distro_name);
+    cmd.env("TERM", &requested_terminal);
+    log_debug(&app_handle, &format!("Launching WSL with TERM={}", requested_terminal));
     // You could also add `~` or equivalent if needed
 
     // Spawn the command inside the PTY

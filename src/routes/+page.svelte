@@ -101,6 +101,53 @@
 
   let profileToEdit: any = null;
 
+  function normalizeRuntimeProfile(profile: any) {
+    if (!profile) return profile;
+
+    return {
+      ...profile,
+      password: profile.password || "",
+      private_key: profile.private_key || "",
+      auth_type: profile.auth_type || null,
+      terminal_type: profile.terminal_type || "xterm-256color"
+    };
+  }
+
+  async function resolveLatestProfile(profile: any) {
+    const normalizedProfile = normalizeRuntimeProfile(profile);
+    if (!normalizedProfile?.id || normalizedProfile.auth_type === 'wsl') {
+      return normalizedProfile;
+    }
+
+    try {
+      const savedProfiles: any[] = await invoke("load_profiles");
+      const latestProfile = savedProfiles.find((savedProfile) => savedProfile.id === normalizedProfile.id);
+      return normalizeRuntimeProfile(latestProfile || normalizedProfile);
+    } catch (error) {
+      console.error("Failed to load the latest connection profile:", error);
+      return normalizedProfile;
+    }
+  }
+
+  async function refreshNodeProfiles(node: SplitNode): Promise<SplitNode> {
+    if (node.type === 'terminal') {
+      return {
+        ...node,
+        profile: await resolveLatestProfile(node.profile)
+      };
+    }
+
+    if (!node.children || node.children.length === 0) {
+      return node;
+    }
+
+    const refreshedChildren = await Promise.all(node.children.map((child) => refreshNodeProfiles(child)));
+    return {
+      ...node,
+      children: refreshedChildren
+    };
+  }
+
   function openConnectionManager(editProfile: any = null) {
     profileToEdit = editProfile;
     showManager = true;
@@ -110,8 +157,8 @@
     showSettings = true;
   }
 
-  function handleConnect(event: CustomEvent<any>) {
-    const profile = event.detail;
+  async function handleConnect(event: CustomEvent<any>) {
+    const profile = await resolveLatestProfile(event.detail);
     showManager = false;
     
     const newTabId = `tab_${Date.now()}`;
@@ -128,8 +175,8 @@
     if (sidebarRef) sidebarRef.refresh();
   }
 
-  function handleQuickConnect(event: CustomEvent<any>) {
-    const profile = event.detail;
+  async function handleQuickConnect(event: CustomEvent<any>) {
+    const profile = await resolveLatestProfile(event.detail);
     const newTabId = `tab_${Date.now()}`;
     const newPaneId = `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
     const rootNode: SplitNode = {
@@ -167,12 +214,14 @@
     contextMenu = { ...contextMenu, visible: false };
   }
 
-  function reconnectTab(tabId: string) {
+  async function reconnectTab(tabId: string) {
     const tabIndex = tabs.findIndex(t => t.id === tabId);
     if (tabIndex === -1) return;
+
+    const refreshedRoot = await refreshNodeProfiles(tabs[tabIndex].root);
     
     const newId = `tab_${Date.now()}`;
-    const updatedTab = { ...tabs[tabIndex], id: newId };
+    const updatedTab = { ...tabs[tabIndex], id: newId, root: refreshedRoot };
     
     tabs = [
       ...tabs.slice(0, tabIndex),

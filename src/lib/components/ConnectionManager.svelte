@@ -2,63 +2,95 @@
   import { onMount, createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { Server, User, Plus, Trash2, X } from "lucide-svelte";
+  import { Eye, EyeOff, Plus, Server, Trash2, X } from "lucide-svelte";
 
   const dispatch = createEventDispatcher();
-  let profiles: any[] = [];
-  let isEditing = false;
-  let editingProfile: any = null;
 
   export let profileToEdit: any = null;
+
+  const terminalOptions = [
+    "xterm-256color",
+    "xterm",
+    "xterm-color",
+    "screen",
+    "screen-256color",
+    "vt100",
+    "vt220",
+    "ansi"
+  ];
+
+  let profiles: any[] = [];
+  let editingProfile: any = null;
+  let selectedProfileId = "";
+  let revealPassword = false;
+
+  function createEmptyProfile() {
+    return {
+      id: `prof_${Date.now()}`,
+      name: "New Connection",
+      host: "127.0.0.1",
+      port: 22,
+      user: "root",
+      password: "",
+      private_key: "",
+      auth_type: null,
+      terminal_type: "xterm-256color"
+    };
+  }
+
+  function normalizeProfile(profile: any) {
+    return {
+      ...createEmptyProfile(),
+      ...profile,
+      password: profile?.password || "",
+      private_key: profile?.private_key || "",
+      auth_type: profile?.auth_type || null,
+      terminal_type: profile?.terminal_type || "xterm-256color"
+    };
+  }
+
+  async function loadProfiles() {
+    try {
+      profiles = await invoke("load_profiles");
+    } catch (e) {
+      console.error(e);
+      profiles = [];
+    }
+  }
 
   async function browseKey() {
     const selected = await open({
       multiple: false,
       directory: false,
     });
-    if (selected && typeof selected === 'string') {
+
+    if (selected && typeof selected === "string") {
       editingProfile.private_key = selected;
     }
   }
-
-  onMount(async () => {
-    try {
-      profiles = await invoke("load_profiles");
-    } catch(e) {
-      console.error(e);
-    }
-    
-    if (profileToEdit) {
-      startEdit(profileToEdit);
-    }
-  });
 
   function close() {
     dispatch("close");
   }
 
-  function startEdit(profile = null) {
-    if (profile) {
-      editingProfile = { ...profile };
-    } else {
-      editingProfile = {
-        id: `prof_${Date.now()}`,
-        name: "New Connection",
-        host: "127.0.0.1",
-        port: 22,
-        user: "root",
-        password: "",
-        private_key: ""
-      };
-    }
-    isEditing = true;
+  function selectProfile(profile: any) {
+    editingProfile = normalizeProfile(profile);
+    selectedProfileId = editingProfile.id;
+    revealPassword = false;
+  }
+
+  function startNewProfile() {
+    editingProfile = createEmptyProfile();
+    selectedProfileId = editingProfile.id;
+    revealPassword = false;
   }
 
   async function saveProfile() {
     try {
       profiles = await invoke("save_profile", { profile: editingProfile });
-      isEditing = false;
-    } catch(e) {
+      const savedProfile = profiles.find((profile) => profile.id === editingProfile.id);
+      selectProfile(savedProfile || editingProfile);
+    } catch (e) {
       console.error(e);
     }
   }
@@ -66,87 +98,190 @@
   async function deleteProfile(id: string) {
     try {
       profiles = await invoke("delete_profile", { id });
-      if (isEditing && editingProfile.id === id) {
-        isEditing = false;
+      if (selectedProfileId === id) {
+        if (profiles.length > 0) {
+          selectProfile(profiles[0]);
+        } else {
+          startNewProfile();
+        }
       }
-    } catch(e) {
+    } catch (e) {
       console.error(e);
     }
   }
 
   function connectTo(profile: any) {
-    dispatch("connect", profile);
+    dispatch("connect", normalizeProfile(profile));
   }
+
+  function getProfilePreview(profile: any) {
+    if (editingProfile && editingProfile.id === profile.id) {
+      return normalizeProfile(editingProfile);
+    }
+
+    return normalizeProfile(profile);
+  }
+
+  function revertProfile() {
+    const existing = profiles.find((profile) => profile.id === selectedProfileId);
+    if (existing) {
+      selectProfile(existing);
+    } else {
+      startNewProfile();
+    }
+  }
+
+  $: hasUnsavedProfile = !!editingProfile && !profiles.some((profile) => profile.id === editingProfile.id);
+
+  onMount(async () => {
+    await loadProfiles();
+
+    if (profileToEdit) {
+      selectProfile(profileToEdit);
+      return;
+    }
+
+    if (profiles.length > 0) {
+      selectProfile(profiles[0]);
+    } else {
+      startNewProfile();
+    }
+  });
 </script>
 
 <div class="modal-backdrop" on:click={close} aria-hidden="true">
   <div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-label="Connections" tabindex="-1">
     <div class="modal-header">
-      <h2>Connections</h2>
-      <button class="icon-btn" on:click={close}><X size={18} /></button>
+      <div>
+        <h2>Connections</h2>
+        <p class="modal-subtitle">Compact connection profiles with agent/Pageant, key, and password fallback.</p>
+      </div>
+      <button class="icon-btn" type="button" aria-label="Close connections" on:click={close}>
+        <X size={18} />
+      </button>
     </div>
 
     <div class="modal-content">
-      {#if isEditing}
-        <div class="edit-form">
-          <label>
-            Name
-            <input type="text" bind:value={editingProfile.name} />
-          </label>
-          <div class="row">
-            <label class="flex-3">
-              Host / IP
-              <input type="text" bind:value={editingProfile.host} />
-            </label>
-            <label class="flex-1">
-              Port
-              <input type="number" bind:value={editingProfile.port} />
-            </label>
-          </div>
-          <div class="row">
-            <label class="flex-1">
-              User
-              <input type="text" bind:value={editingProfile.user} />
-            </label>
-            <label class="flex-1">
-              Password (or passphrase)
-              <input type="password" bind:value={editingProfile.password} />
-            </label>
-          </div>
-          <label>
-            Private Key (Path to file, e.g. ~/.ssh/id_rsa)
-            <div style="display: flex; gap: 8px;">
-              <input type="text" bind:value={editingProfile.private_key} placeholder="Leave empty to use password" style="flex: 1;" />
-              <button type="button" class="secondary-btn" on:click={browseKey} style="padding: 0 16px;">Browse...</button>
-            </div>
-          </label>
-          <div class="modal-actions">
-            <button class="secondary-btn" on:click={() => { isEditing = false; if(profileToEdit) close(); }}>Cancel</button>
-            <button class="primary-btn" on:click={saveProfile}>Save</button>
-          </div>
+      <aside class="profile-list-pane">
+        <div class="pane-toolbar">
+          <button class="outline-btn" type="button" on:click={startNewProfile}>
+            <Plus size={16} class="mr-2" /> New Connection
+          </button>
         </div>
-      {:else}
+
         <div class="profiles-list">
-          {#each profiles as p}
-            <div class="profile-card">
-              <div class="profile-info" on:click={() => startEdit(p)} aria-hidden="true">
-                <div class="profile-name"><Server size={14} class="mr-2"/> {p.name}</div>
-                <div class="profile-host"><User size={12} class="mr-1"/> {p.user}@{p.host}:{p.port}</div>
-              </div>
-              <div class="card-actions">
-                <button class="primary-btn sm" on:click={() => connectTo(p)}>Connect</button>
-                <button class="icon-btn danger" on:click={() => deleteProfile(p.id)}><Trash2 size={16} /></button>
+          {#each profiles as profile}
+            {@const profilePreview = getProfilePreview(profile)}
+            <div class="profile-card {selectedProfileId === profile.id ? 'selected' : ''}">
+              <button class="profile-main" type="button" on:click={() => selectProfile(profile)}>
+                <span class="profile-name"><Server size={14} class="mr-2" /> {profilePreview.name}</span>
+                <span class="profile-host">{profilePreview.user}@{profilePreview.host}:{profilePreview.port}</span>
+                <span class="profile-terminal">{profilePreview.terminal_type}</span>
+              </button>
+              <div class="profile-actions">
+                <button class="primary-btn sm" type="button" on:click={() => connectTo(profilePreview)}>Connect</button>
+                <button class="icon-btn danger" type="button" aria-label={`Delete ${profile.name}`} on:click={() => deleteProfile(profile.id)}>
+                  <Trash2 size={15} />
+                </button>
               </div>
             </div>
           {/each}
+
+          {#if profiles.length === 0}
+            <div class="empty-list-state">No saved connections yet.</div>
+          {/if}
         </div>
-        
-        <div class="add-new">
-          <button class="outline-btn" on:click={() => startEdit(null)}>
-            <Plus size={16} class="mr-2"/> Add Connection
-          </button>
-        </div>
-      {/if}
+      </aside>
+
+      <section class="editor-pane">
+        {#if editingProfile}
+          <div class="editor-header">
+            <div>
+              <h3>{hasUnsavedProfile ? 'Create Connection' : 'Edit Connection'}</h3>
+              <p class="editor-hint">Authentication order: agent/Pageant, configured key, default `~/.ssh` keys, then password.</p>
+            </div>
+            <div class="editor-actions">
+              <button class="secondary-btn" type="button" on:click={revertProfile}>Revert</button>
+              {#if !hasUnsavedProfile}
+                <button class="secondary-btn" type="button" on:click={() => connectTo(editingProfile)}>Connect</button>
+              {/if}
+              <button class="primary-btn" type="button" on:click={saveProfile}>Save</button>
+            </div>
+          </div>
+
+          <div class="editor-body">
+            <section class="editor-section">
+              <div class="section-title-row">
+                <h4>Basic</h4>
+              </div>
+
+              <label class="field wide">
+                <span>Name</span>
+                <input type="text" bind:value={editingProfile.name} />
+              </label>
+
+              <div class="field-grid field-grid-main">
+                <label class="field field-host">
+                  <span>Host / IP</span>
+                  <input type="text" bind:value={editingProfile.host} />
+                </label>
+                <label class="field field-port">
+                  <span>Port</span>
+                  <input type="number" bind:value={editingProfile.port} min="1" max="65535" />
+                </label>
+                <label class="field field-user">
+                  <span>User</span>
+                  <input type="text" bind:value={editingProfile.user} />
+                </label>
+              </div>
+            </section>
+
+            <section class="editor-section">
+              <div class="section-title-row">
+                <h4>Authentication</h4>
+                <span class="section-note">Password and key can stay empty if agent/Pageant or `~/.ssh` should be used first.</span>
+              </div>
+
+              <label class="field">
+                <span>Password or key passphrase</span>
+                <div class="input-with-action">
+                  <input type={revealPassword ? "text" : "password"} bind:value={editingProfile.password} placeholder="Optional. Prompted at connect time if needed." />
+                  <button class="icon-btn ghost" type="button" aria-label={revealPassword ? 'Hide password' : 'Reveal password'} on:click={() => revealPassword = !revealPassword}>
+                    {#if revealPassword}
+                      <EyeOff size={16} />
+                    {:else}
+                      <Eye size={16} />
+                    {/if}
+                  </button>
+                </div>
+              </label>
+
+              <label class="field">
+                <span>Private key file</span>
+                <div class="input-with-button">
+                  <input type="text" bind:value={editingProfile.private_key} placeholder="Optional. Leave empty to rely on agent/Pageant or ~/.ssh." spellcheck="false" />
+                  <button class="secondary-btn" type="button" on:click={browseKey}>Browse</button>
+                </div>
+              </label>
+            </section>
+
+            <section class="editor-section">
+              <div class="section-title-row">
+                <h4>Terminal</h4>
+              </div>
+
+              <label class="field compact">
+                <span>Default PTY terminal type</span>
+                <select bind:value={editingProfile.terminal_type}>
+                  {#each terminalOptions as terminalOption}
+                    <option value={terminalOption}>{terminalOption}</option>
+                  {/each}
+                </select>
+              </label>
+            </section>
+          </div>
+        {/if}
+      </section>
     </div>
   </div>
 </div>
@@ -154,11 +289,8 @@
 <style>
   .modal-backdrop {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: rgba(0, 0, 0, 0.7);
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.72);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -166,199 +298,336 @@
   }
 
   .modal {
+    width: min(1080px, 94vw);
+    min-height: 620px;
+    max-height: 88vh;
     background-color: var(--bg-surface);
-    width: 600px;
-    max-width: 90vw;
-    border-radius: 12px;
     border: 1px solid var(--border);
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    border-radius: 16px;
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.55);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 
   .modal-header {
     display: flex;
+    align-items: flex-start;
     justify-content: space-between;
-    align-items: center;
-    padding: 16px 20px;
+    gap: 16px;
+    padding: 18px 22px;
     border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(59, 130, 246, 0.08), transparent 85%);
   }
 
   .modal-header h2 {
     margin: 0;
-    font-size: 18px;
-    font-weight: 500;
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  .modal-subtitle {
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
   }
 
   .modal-content {
-    padding: 20px;
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 320px minmax(0, 1fr);
   }
 
-  .icon-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 6px;
-    border-radius: 6px;
+  .profile-list-pane {
+    border-right: 1px solid var(--border);
+    background: rgba(13, 14, 18, 0.45);
     display: flex;
-    align-items: center;
-  }
-  
-  .icon-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-main);
+    flex-direction: column;
+    min-height: 0;
   }
 
-  .icon-btn.danger:hover {
-    color: var(--danger);
+  .pane-toolbar {
+    padding: 18px;
+    border-bottom: 1px solid var(--border);
   }
 
   .profiles-list {
+    padding: 14px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    margin-bottom: 20px;
-    max-height: 400px;
+    gap: 10px;
     overflow-y: auto;
   }
 
   .profile-card {
-    background-color: var(--bg-dark);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px 16px;
+    border-radius: 12px;
+    background: var(--bg-dark);
+    padding: 10px;
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    flex-direction: column;
+    gap: 10px;
   }
 
-  .profile-info {
+  .profile-card.selected {
+    border-color: rgba(59, 130, 246, 0.65);
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.28);
+  }
+
+  .profile-main {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+    text-align: left;
     cursor: pointer;
-    flex: 1;
+    padding: 2px;
   }
 
   .profile-name {
-    font-weight: 500;
-    margin-bottom: 4px;
     display: flex;
     align-items: center;
+    font-weight: 600;
+    color: var(--text-main);
   }
 
-  .profile-host {
+  .profile-host,
+  .profile-terminal {
     font-size: 12px;
     color: var(--text-muted);
-    display: flex;
-    align-items: center;
   }
 
-  .card-actions {
+  .profile-actions {
     display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .editor-pane {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .editor-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 20px 22px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .editor-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  .editor-hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .editor-body {
+    padding: 20px 22px 24px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .editor-section {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    background: rgba(13, 14, 18, 0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .section-title-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .section-title-row h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .section-note {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .field-grid {
+    display: grid;
+    gap: 12px;
+  }
+
+  .field-grid-main {
+    grid-template-columns: minmax(0, 1.6fr) 110px minmax(0, 1fr);
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .field span {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .wide {
+    width: 100%;
+  }
+
+  input,
+  select {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    background-color: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+
+  input:focus,
+  select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.14);
+  }
+
+  .input-with-action,
+  .input-with-button {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     align-items: center;
   }
 
-  .add-new {
-    display: flex;
+  .empty-list-state {
+    padding: 18px 14px;
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    color: var(--text-muted);
+    text-align: center;
+    font-size: 13px;
+  }
+
+  .icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 7px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
     justify-content: center;
   }
 
-  .edit-form {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .row {
-    display: flex;
-    gap: 12px;
-  }
-
-  .flex-1 { flex: 1; }
-  .flex-3 { flex: 3; }
-
-  label {
-    display: flex;
-    flex-direction: column;
-    font-size: 13px;
-    color: var(--text-muted);
-    gap: 6px;
-  }
-
-  input {
-    background-color: var(--bg-dark);
-    border: 1px solid var(--border);
+  .icon-btn:hover {
+    background: var(--bg-hover);
     color: var(--text-main);
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 14px;
-    transition: border-color 0.2s;
   }
 
-  input:focus {
-    outline: none;
-    border-color: var(--accent);
+  .icon-btn.ghost {
+    border: 1px solid var(--border);
+    background: var(--bg-dark);
   }
 
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 12px;
-    margin-top: 10px;
+  .icon-btn.danger:hover {
+    color: #f87171;
+  }
+
+  .primary-btn,
+  .secondary-btn,
+  .outline-btn {
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
   }
 
   .primary-btn {
-    background-color: var(--accent);
-    color: white;
     border: none;
-    padding: 8px 16px;
-    border-radius: 6px;
-    font-weight: 500;
-    cursor: pointer;
-  }
-
-  .primary-btn.sm {
-    padding: 6px 12px;
-    font-size: 13px;
+    background: var(--accent);
+    color: white;
   }
 
   .primary-btn:hover {
-    background-color: var(--accent-hover);
-  }
-  
-  .secondary-btn {
-    background-color: transparent;
-    color: var(--text-main);
-    border: 1px solid var(--border);
-    padding: 8px 16px;
-    border-radius: 6px;
-    cursor: pointer;
+    background: var(--accent-hover);
   }
 
-  .secondary-btn:hover {
-    background-color: var(--bg-hover);
+  .primary-btn.sm {
+    padding: 7px 11px;
+  }
+
+  .secondary-btn {
+    background: transparent;
+    color: var(--text-main);
+    border: 1px solid var(--border);
+  }
+
+  .secondary-btn:hover,
+  .outline-btn:hover {
+    background: var(--bg-hover);
   }
 
   .outline-btn {
-    background-color: transparent;
-    border: 1px dashed var(--border);
-    color: var(--text-muted);
     width: 100%;
-    padding: 12px;
-    border-radius: 8px;
-    display: flex;
+    border: 1px dashed var(--border);
+    background: transparent;
+    color: var(--text-main);
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    cursor: pointer;
-    font-weight: 500;
-    transition: all 0.2s;
   }
 
-  .outline-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-    background-color: rgba(59, 130, 246, 0.05);
+  @media (max-width: 920px) {
+    .modal-content {
+      grid-template-columns: 1fr;
+    }
+
+    .profile-list-pane {
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+      max-height: 260px;
+    }
+
+    .field-grid-main {
+      grid-template-columns: 1fr;
+    }
   }
 
-  :global(.mr-1) { margin-right: 4px; }
   :global(.mr-2) { margin-right: 8px; }
 </style>

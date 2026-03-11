@@ -29,6 +29,8 @@ pub fn run() {
             profile_storage::delete_profile,
             settings_storage::load_settings,
             settings_storage::save_settings,
+            settings_storage::get_storage_path_info,
+            settings_storage::set_config_directory,
             settings_storage::get_settings_path_info,
             settings_storage::load_autocomplete,
             settings_storage::save_autocomplete,

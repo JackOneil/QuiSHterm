@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed:
   * Removed recursive split tree rendering for stability.
 - Added:
+  * **Agent and Pageant Authentication Chain**: SSH connections now try Pageant/SSH agent identities first, then a configured private key, then default keys from `~/.ssh`, and finally password authentication.
+  * **Password Prompt Fallback**: If agent and key-based authentication do not succeed and no password is stored in the profile, the terminal now prompts for the password with a masked input and reveal toggle.
+  * **Per-Connection Terminal Type**: Connection profiles can now store their own PTY terminal type such as `xterm`, `xterm-color`, or `xterm-256color`.
+  * **Custom Config Directory**: Added a Settings option to choose the directory used for `settings.json`, `profiles.json`, and `autocomplete.json`, with automatic migration of existing files.
   * **Terminal Selection Context Menu**: Right-clicking inside the terminal now opens a custom context menu with `Copy`, `Paste`, and `Search on Web`. Web search opens the default browser with the selected text.
   * **SFTP Visual Browser**: Right-click context option on any connected tab to open an interactive file tree modal.
   * **Remote File Actions**: Supported recursive directory browsing, downloads to local machine, and fast uploads through Base64 payload encoding over the active SSH channel.
@@ -19,10 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     * Learning new commands: Unknown words can now be silently saved to the local dictionary using the `Shift+Tab` keyboard shortcut. This frees up the native `Tab` key for natural Linux path completion (e.g. `/var/log`).
     * Implemented Levenshtein distance for fuzzy matching and improved suggestion relevance.
 ### Changed
+* Reworked the connection editor into a more compact two-pane layout so additional connection options can be added without the form becoming visually heavy.
 * Added a toggle for smart command autocomplete (`Enable Smart Autocomplete`) in the `Terminal` section of the Settings window, responding instantly without reconnecting sessions.
 * The status bar now displays a small hint recommending the relevant keyboard shortcut.
 
 ### Fixed
+* Fixed the runtime password prompt so clicking into the password field no longer hands focus back to the terminal wrapper and prevents typing.
+* Fixed the WSL PTY path to propagate the selected connection terminal type via `TERM` instead of silently falling back to the default terminal setting.
+* Fixed stale connection profile usage during connect and reconnect flows so updated per-connection terminal types are reloaded from storage instead of reusing an older in-memory snapshot.
+* Fixed SSH PTY initialization to also export `TERM` explicitly on the SSH channel and show the requested terminal type in the terminal log during connection setup for easier verification.
+* Fixed a regression where the spacebar stopped working in the terminal because the outer terminal container intercepted the `Space` key while handling focus for the custom context menu wrapper.
 * The Xterm terminal field border was adding a bottom offset that clipped the visualization of the last text line when the window was maximized. The issue was resolved by moving padding below a clean flex-wrapper (including `box-sizing: border-box`), which corrects the miscalculations from Xterm's internal `FitAddon` algorithm.
 * Line gutters would sometimes drift from the actual text due to flexbox formatting and browser rounding errors. Line numbers now use precise decimal cell height from the native grid and absolute positioning (`top: Npx` for each section), which completely eliminates cumulative height drift.
 * The floating autocomplete popup no longer jumps high up if it has only one item near the bottom edge of the window. Position is now controlled by real dynamic height estimation via Boundary Box rendering.

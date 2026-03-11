@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SshProfile {
@@ -10,8 +10,18 @@ pub struct SshProfile {
     pub host: String,
     pub port: u16,
     pub user: String,
+    #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
     pub private_key: Option<String>,
+    #[serde(default)]
+    pub auth_type: Option<String>,
+    #[serde(default = "default_terminal_type")]
+    pub terminal_type: String,
+}
+
+fn default_terminal_type() -> String {
+    "xterm-256color".to_string()
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -20,14 +30,8 @@ pub struct ProfileStore {
 }
 
 pub fn get_storage_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let app_dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("Could not get config dir: {}", e))?;
-    
-    if !app_dir.exists() {
-        fs::create_dir_all(&app_dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
-    }
+    let app_dir = crate::settings_storage::get_config_root(app);
+    crate::settings_storage::ensure_config_root(&app_dir)?;
 
     Ok(app_dir.join("profiles.json"))
 }

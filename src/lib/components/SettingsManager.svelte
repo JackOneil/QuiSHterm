@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { Settings, X } from "lucide-svelte";
 
   const dispatch = createEventDispatcher();
@@ -13,8 +14,25 @@
     enable_autocomplete: true
   };
   let settingsPath = "";
+  let configDirectory = "";
+  let savedConfigDirectory = "";
+  let defaultConfigDirectory = "";
+  let isCustomConfigDirectory = false;
   let modalEl: HTMLElement;
   let resizeObserver: ResizeObserver | null = null;
+
+  async function refreshStorageInfo() {
+    try {
+      const storageInfo: any = await invoke("get_storage_path_info");
+      settingsPath = storageInfo.settings_file || "";
+      configDirectory = storageInfo.config_dir || "";
+      savedConfigDirectory = storageInfo.config_dir || "";
+      defaultConfigDirectory = storageInfo.default_config_dir || "";
+      isCustomConfigDirectory = storageInfo.is_custom === true;
+    } catch (e) {
+      console.error(e);
+    }
+  }
 
   onMount(async () => {
     try {
@@ -24,11 +42,7 @@
     } catch(e) {
       console.error(e);
     }
-    try {
-      settingsPath = await invoke("get_settings_path_info");
-    } catch(e) {
-      console.error(e);
-    }
+    await refreshStorageInfo();
     // Restore saved modal size
     if (modalEl) {
       const savedW = localStorage.getItem('settings_modal_width');
@@ -72,11 +86,43 @@
 
   async function saveSettings() {
     try {
+      if (configDirectory.trim() !== savedConfigDirectory.trim()) {
+        const storageInfo: any = await invoke("set_config_directory", {
+          directory: configDirectory.trim() || null
+        });
+        settingsPath = storageInfo.settings_file || "";
+        configDirectory = storageInfo.config_dir || "";
+        savedConfigDirectory = storageInfo.config_dir || "";
+        defaultConfigDirectory = storageInfo.default_config_dir || "";
+        isCustomConfigDirectory = storageInfo.is_custom === true;
+      }
       await invoke("save_settings", { settings });
       close();
     } catch(e) {
       console.error(e);
     }
+  }
+
+  async function browseConfigDirectory() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+      });
+      if (selected && typeof selected === "string") {
+        configDirectory = selected;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function resetConfigDirectory() {
+    configDirectory = savedConfigDirectory;
+  }
+
+  function useDefaultConfigDirectory() {
+    configDirectory = defaultConfigDirectory;
   }
 
   let activeTab = "Dictionary";
@@ -129,7 +175,23 @@
           </div>
           <div class="settings-group mt-3">
             <h3>Storage</h3>
-            <div class="info-row">
+            <div class="storage-panel">
+              <label class="storage-field" for="config-directory-input">
+                <span class="label-text">
+                  <strong>Config directory</strong>
+                  <span class="desc">Directory used for `settings.json`, `profiles.json`, and `autocomplete.json`.</span>
+                </span>
+                <div class="path-controls">
+                  <input id="config-directory-input" class="path-input" type="text" bind:value={configDirectory} spellcheck="false" />
+                  <button class="secondary-btn" type="button" on:click={browseConfigDirectory}>Browse</button>
+                  <button class="secondary-btn" type="button" on:click={resetConfigDirectory} disabled={configDirectory.trim() === savedConfigDirectory.trim()}>Revert</button>
+                </div>
+              </label>
+              <div class="storage-actions">
+                <button class="secondary-btn" type="button" on:click={useDefaultConfigDirectory} disabled={configDirectory.trim() === defaultConfigDirectory.trim()}>Use Default</button>
+              </div>
+            </div>
+            <div class="info-row mt-3">
               <span class="label-text">
                 <strong>Settings file location</strong>
                 <span class="desc path-text">{settingsPath || 'Loading...'}</span>
@@ -338,6 +400,49 @@
     background-color: var(--bg-dark);
     border: 1px solid var(--border);
     border-radius: 8px;
+  }
+
+  .storage-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    background-color: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .storage-field {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .path-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .path-input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 12px;
+    background: var(--bg-darker, #0d0e12);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: white;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .path-input:focus {
+    border-color: var(--accent);
+  }
+
+  .storage-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .label-text {

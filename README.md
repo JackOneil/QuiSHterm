@@ -5,6 +5,10 @@ QuiSHterm is a modern, lightweight, and customizable SSH terminal built with Rus
 ## Features
 - **Modern UI**: Clean, intuitive interface for managing multiple SSH sessions.
 - **QuickConnect Sidebar**: Right sidebar panel for easy access to saved connections with folder categorization and right-click context menu (Edit/Connect/Remove).
+- **Agent/Pageant Authentication**: Connections automatically try Pageant or the system SSH agent first, then configured keys, then default keys from `~/.ssh`, before falling back to password authentication.
+- **Password Prompt Fallback**: If no stored password is available, the terminal prompts for it at connect time with a masked input and reveal toggle.
+- **Per-Connection Terminal Type**: Each saved connection can choose its PTY terminal type such as `xterm`, `xterm-color`, `xterm-256color`, `screen`, or `vt100`.
+- **Config Directory Override**: Choose a custom directory for `settings.json`, `profiles.json`, and `autocomplete.json` directly from Settings.
 - **Customizable Highlights**: Color-code terminal output with user-defined regex rules (e.g., green for IP addresses, cyan for timestamps).
 - **Live Status Tracking**: Bottom status bar tracking sent/received (TX/RX) network data over SSH along with connection targets.
 - **Persistent Storage**: Safely manage SSH profiles and settings.
